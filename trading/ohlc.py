@@ -15,22 +15,67 @@ class OHLCBuilder:
         max_candles=500
     ):
 
-        # Current active candle
         self.current_candle = None
 
-        # Completed candles
         self.completed_candles = []
 
-        # Configuration
         self.interval_seconds = interval_seconds
+
         self.max_candles = max_candles
 
-        # Current candle start time
         self.candle_start_time = None
 
     # ==================================================
     # Private Methods
     # ==================================================
+
+    def _validate_tick(
+        self,
+        tick
+    ):
+        """
+        Validates Zerodha tick.
+        """
+
+        if not isinstance(
+            tick,
+            dict
+        ):
+            raise TypeError(
+                "Tick must be a dictionary."
+            )
+
+        if "last_price" not in tick:
+            raise KeyError(
+                "Tick does not contain "
+                "'last_price'."
+            )
+
+    def _extract_tick_data(
+        self,
+        tick
+    ):
+        """
+        Extracts price and timestamp.
+        """
+
+        price = tick["last_price"]
+
+        timestamp = tick.get(
+            "exchange_timestamp"
+        )
+
+        if timestamp is None:
+
+            timestamp = tick.get(
+                "timestamp"
+            )
+
+        if timestamp is None:
+
+            timestamp = datetime.now()
+
+        return price, timestamp
 
     def _create_new_candle(
         self,
@@ -73,7 +118,7 @@ class OHLCBuilder:
         timestamp
     ):
         """
-        Returns True if the current candle
+        Checks whether the current candle
         has completed.
         """
 
@@ -94,8 +139,7 @@ class OHLCBuilder:
         self
     ):
         """
-        Stores the completed candle
-        and limits history size.
+        Stores completed candle.
         """
 
         if self.current_candle is None:
@@ -124,35 +168,18 @@ class OHLCBuilder:
         Zerodha market tick.
         """
 
-        if not isinstance(
-            tick,
-            dict
-        ):
-            raise TypeError(
-                "Tick must be a dictionary."
-            )
-
-        if "last_price" not in tick:
-            raise KeyError(
-                "Tick does not contain "
-                "'last_price'."
-            )
-
-        price = tick["last_price"]
-
-        timestamp = tick.get(
-            "exchange_timestamp"
+        self._validate_tick(
+            tick
         )
 
-        if timestamp is None:
-            timestamp = tick.get(
-                "timestamp"
+        price, timestamp = (
+            self._extract_tick_data(
+                tick
             )
+        )
 
-        if timestamp is None:
-            timestamp = datetime.now()
-                    # ---------------------------------
-        # First Candle
+        # ---------------------------------
+        # Create First Candle
         # ---------------------------------
 
         if self.current_candle is None:
@@ -165,7 +192,7 @@ class OHLCBuilder:
             return self.current_candle
 
         # ---------------------------------
-        # Candle Completed?
+        # Check Candle Completion
         # ---------------------------------
 
         if self._is_candle_complete(
@@ -208,7 +235,7 @@ class OHLCBuilder:
         """
 
         return self.completed_candles
-    
+
     def get_latest_completed_candle(
         self
     ):
