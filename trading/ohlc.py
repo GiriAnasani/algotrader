@@ -5,35 +5,137 @@ from trading.candle import Candle
 
 class OHLCBuilder:
     """
-    Builds a single OHLC candle
+    Builds OHLC candles
     from incoming live ticks.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        interval_seconds=60,
+        max_candles=500
+    ):
 
+        # Current active candle
         self.current_candle = None
+
+        # Completed candles
+        self.completed_candles = []
+
+        # Configuration
+        self.interval_seconds = interval_seconds
+        self.max_candles = max_candles
+
+        # Current candle start time
+        self.candle_start_time = None
+
+    # ==================================================
+    # Private Methods
+    # ==================================================
+
+    def _create_new_candle(
+        self,
+        price,
+        timestamp
+    ):
+        """
+        Creates a new candle.
+        """
+
+        self.candle_start_time = timestamp
+
+        self.current_candle = Candle(
+            time=timestamp,
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            volume=0
+        )
+
+    def _update_current_candle(
+        self,
+        price
+    ):
+        """
+        Updates the active candle.
+        """
+
+        if price > self.current_candle.high:
+            self.current_candle.high = price
+
+        if price < self.current_candle.low:
+            self.current_candle.low = price
+
+        self.current_candle.close = price
+
+    def _is_candle_complete(
+        self,
+        timestamp
+    ):
+        """
+        Returns True if the current candle
+        has completed.
+        """
+
+        if self.candle_start_time is None:
+            return False
+
+        elapsed = (
+            timestamp -
+            self.candle_start_time
+        ).total_seconds()
+
+        return (
+            elapsed >=
+            self.interval_seconds
+        )
+
+    def _finalize_candle(
+        self
+    ):
+        """
+        Stores the completed candle
+        and limits history size.
+        """
+
+        if self.current_candle is None:
+            return
+
+        self.completed_candles.append(
+            self.current_candle
+        )
+
+        if (
+            len(self.completed_candles)
+            > self.max_candles
+        ):
+            self.completed_candles.pop(0)
+
+    # ==================================================
+    # Public Methods
+    # ==================================================
 
     def process_tick(
         self,
         tick
     ):
         """
-        Processes one incoming market tick.
-
-        Parameters
-        ----------
-        tick : dict
-            Zerodha tick dictionary.
+        Processes one incoming
+        Zerodha market tick.
         """
 
-        if not isinstance(tick, dict):
+        if not isinstance(
+            tick,
+            dict
+        ):
             raise TypeError(
                 "Tick must be a dictionary."
             )
 
         if "last_price" not in tick:
             raise KeyError(
-                "Tick does not contain 'last_price'."
+                "Tick does not contain "
+                "'last_price'."
             )
 
         price = tick["last_price"]
@@ -49,58 +151,92 @@ class OHLCBuilder:
 
         if timestamp is None:
             timestamp = datetime.now()
-
-        # -----------------------------
-        # Create First Candle
-        # -----------------------------
+                    # ---------------------------------
+        # First Candle
+        # ---------------------------------
 
         if self.current_candle is None:
 
-            self.current_candle = Candle(
-                time=timestamp,
-                open=price,
-                high=price,
-                low=price,
-                close=price,
-                volume=0
+            self._create_new_candle(
+                price,
+                timestamp
             )
 
             return self.current_candle
 
-        # -----------------------------
-        # Update High
-        # -----------------------------
+        # ---------------------------------
+        # Candle Completed?
+        # ---------------------------------
 
-        if price > self.current_candle.high:
+        if self._is_candle_complete(
+            timestamp
+        ):
 
-            self.current_candle.high = price
+            self._finalize_candle()
 
-        # -----------------------------
-        # Update Low
-        # -----------------------------
+            self._create_new_candle(
+                price,
+                timestamp
+            )
 
-        if price < self.current_candle.low:
+            return self.current_candle
 
-            self.current_candle.low = price
+        # ---------------------------------
+        # Update Current Candle
+        # ---------------------------------
 
-        # -----------------------------
-        # Update Close
-        # -----------------------------
-
-        self.current_candle.close = price
-
-        return self.current_candle
-
-    def get_current_candle(self):
-        """
-        Returns the latest candle.
-        """
+        self._update_current_candle(
+            price
+        )
 
         return self.current_candle
 
-    def reset(self):
+    def get_current_candle(
+        self
+    ):
         """
-        Clears the current candle.
+        Returns the active candle.
+        """
+
+        return self.current_candle
+
+    def get_completed_candles(
+        self
+    ):
+        """
+        Returns all completed candles.
+        """
+
+        return self.completed_candles
+    
+    def get_latest_completed_candle(
+        self
+    ):
+        """
+        Returns the latest completed candle.
+        """
+
+        if not self.completed_candles:
+            return None
+
+        return self.completed_candles[-1]
+
+    def clear_history(
+        self
+    ):
+        """
+        Clears completed candle history.
+        """
+
+        self.completed_candles.clear()
+
+    def reset(
+        self
+    ):
+        """
+        Resets the OHLC builder.
         """
 
         self.current_candle = None
+        self.completed_candles.clear()
+        self.candle_start_time = None
