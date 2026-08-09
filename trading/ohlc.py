@@ -15,14 +15,20 @@ class OHLCBuilder:
         max_candles=500
     ):
 
+        # Active candle
         self.current_candle = None
 
+        # Latest completed candle
+        self.completed_candle = None
+
+        # Candle history
         self.completed_candles = []
 
+        # Configuration
         self.interval_seconds = interval_seconds
-
         self.max_candles = max_candles
 
+        # Current candle start time
         self.candle_start_time = None
 
     # ==================================================
@@ -75,7 +81,10 @@ class OHLCBuilder:
 
             timestamp = datetime.now()
 
-        return price, timestamp
+        return (
+            price,
+            timestamp
+        )
 
     def _create_new_candle(
         self,
@@ -145,6 +154,10 @@ class OHLCBuilder:
         if self.current_candle is None:
             return
 
+        self.completed_candle = (
+            self.current_candle
+        )
+
         self.completed_candles.append(
             self.current_candle
         )
@@ -168,6 +181,9 @@ class OHLCBuilder:
         Zerodha market tick.
         """
 
+        # Reset latest completed candle
+        self.completed_candle = None
+
         self._validate_tick(
             tick
         )
@@ -189,7 +205,12 @@ class OHLCBuilder:
                 timestamp
             )
 
-            return self.current_candle
+            return {
+                "current_candle":
+                    self.current_candle,
+                "completed_candle":
+                    self.completed_candle
+            }
 
         # ---------------------------------
         # Check Candle Completion
@@ -206,7 +227,12 @@ class OHLCBuilder:
                 timestamp
             )
 
-            return self.current_candle
+            return {
+                "current_candle":
+                    self.current_candle,
+                "completed_candle":
+                    self.completed_candle
+            }
 
         # ---------------------------------
         # Update Current Candle
@@ -216,7 +242,12 @@ class OHLCBuilder:
             price
         )
 
-        return self.current_candle
+        return {
+            "current_candle":
+                self.current_candle,
+            "completed_candle":
+                self.completed_candle
+        }
 
     def get_current_candle(
         self
@@ -226,6 +257,15 @@ class OHLCBuilder:
         """
 
         return self.current_candle
+
+    def get_completed_candle(
+        self
+    ):
+        """
+        Returns the latest completed candle.
+        """
+
+        return self.completed_candle
 
     def get_completed_candles(
         self
@@ -240,7 +280,8 @@ class OHLCBuilder:
         self
     ):
         """
-        Returns the latest completed candle.
+        Returns the latest completed candle
+        from history.
         """
 
         if not self.completed_candles:
@@ -257,6 +298,8 @@ class OHLCBuilder:
 
         self.completed_candles.clear()
 
+        self.completed_candle = None
+
     def reset(
         self
     ):
@@ -265,5 +308,11 @@ class OHLCBuilder:
         """
 
         self.current_candle = None
+
+        self.completed_candle = None
+
         self.completed_candles.clear()
+
         self.candle_start_time = None
+
+        return None

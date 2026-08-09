@@ -8,6 +8,7 @@ from core.config import (
 )
 
 from trading.ohlc import OHLCBuilder
+from trading.ema import EMA
 
 
 class MarketData:
@@ -23,10 +24,16 @@ class MarketData:
     ):
 
         self.kite = kite
+
         self.instruments = instruments
 
         # OHLC Builder
         self.ohlc = OHLCBuilder()
+
+        # Indicators
+        self.ema20 = EMA(
+            period=20
+        )
 
     # ==================================================
     # Historical Data
@@ -68,7 +75,7 @@ class MarketData:
             raise ValueError(
                 f"Unsupported interval: {interval}"
             )
-
+        
         instrument_token = (
             self.instruments.get_instrument_token(
                 symbol
@@ -94,7 +101,10 @@ class MarketData:
     # Live Market Data
     # ==================================================
 
-    def connect_live(self, symbol):
+    def connect_live(
+        self,
+        symbol
+    ):
 
         instrument_token = (
             self.instruments.get_instrument_token(
@@ -107,11 +117,16 @@ class MarketData:
             self.kite.access_token
         )
 
-        def on_connect(ws, response):
+        def on_connect(
+            ws,
+            response
+        ):
 
             print()
             print("=" * 60)
-            print("Connected to Zerodha WebSocket")
+            print(
+                "Connected to Zerodha WebSocket"
+            )
             print("=" * 60)
 
             ws.subscribe(
@@ -124,16 +139,63 @@ class MarketData:
             )
 
             print()
-            print(f"Subscribed : {symbol}")
+            print(
+                f"Subscribed : {symbol}"
+            )
             print()
 
-        def on_ticks(ws, ticks):
+        def on_ticks(
+            ws,
+            ticks
+        ):
 
             for tick in ticks:
 
-                candle = self.ohlc.process_tick(
-                    tick
+                result = (
+                    self.ohlc.process_tick(
+                        tick
+                    )
                 )
+
+                current_candle = (
+                    result[
+                        "current_candle"
+                    ]
+                )
+
+                completed_candle = (
+                    result[
+                        "completed_candle"
+                    ]
+                )
+
+                # -------------------------
+                # Update EMA
+                # -------------------------
+
+                if completed_candle is not None:
+
+                    ema_value = (
+                        self.ema20.update(
+                            completed_candle
+                        )
+                    )
+
+                    if ema_value is not None:
+
+                        print()
+                        print(
+                            "=" * 60
+                        )
+
+                        print(
+                            f"EMA 20 : "
+                            f"{ema_value:.2f}"
+                        )
+
+                        print(
+                            "=" * 60
+                        )
 
                 print("=" * 60)
                 print("CURRENT CANDLE")
@@ -144,29 +206,43 @@ class MarketData:
                 )
 
                 print(
-                    f"Open   : {candle.open}"
+                    f"Open   : "
+                    f"{current_candle.open}"
                 )
 
                 print(
-                    f"High   : {candle.high}"
+                    f"High   : "
+                    f"{current_candle.high}"
                 )
 
                 print(
-                    f"Low    : {candle.low}"
+                    f"Low    : "
+                    f"{current_candle.low}"
                 )
 
                 print(
-                    f"Close  : {candle.close}"
+                    f"Close  : "
+                    f"{current_candle.close}"
                 )
 
                 print()
 
-        def on_close(ws, code, reason):
+        def on_close(
+            ws,
+            code,
+            reason
+        ):
 
             print()
-            print("WebSocket Closed")
+            print(
+                "WebSocket Closed"
+            )
 
-        def on_error(ws, code, reason):
+        def on_error(
+            ws,
+            code,
+            reason
+        ):
 
             print()
             print(
