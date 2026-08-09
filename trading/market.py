@@ -131,10 +131,8 @@ class MarketData:
 
             for tick in ticks:
 
-                price = tick["last_price"]
-
                 candle = self.ohlc.process_tick(
-                    price
+                    tick
                 )
 
                 print("=" * 60)
@@ -146,19 +144,19 @@ class MarketData:
                 )
 
                 print(
-                    f"Open   : {candle['open']}"
+                    f"Open   : {candle.open}"
                 )
 
                 print(
-                    f"High   : {candle['high']}"
+                    f"High   : {candle.high}"
                 )
 
                 print(
-                    f"Low    : {candle['low']}"
+                    f"Low    : {candle.low}"
                 )
 
                 print(
-                    f"Close  : {candle['close']}"
+                    f"Close  : {candle.close}"
                 )
 
                 print()
