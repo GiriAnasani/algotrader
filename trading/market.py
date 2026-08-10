@@ -31,9 +31,12 @@ class MarketData:
         self.ohlc = OHLCBuilder()
 
         # Indicators
-        self.ema20 = EMA(
-            period=20
-        )
+        self.emas = {
+            period: EMA(
+                period=period
+            )
+            for period in [10, 20, 50, 100, 200]
+        }
 
         # Completed candle counter
         self.completed_candle_count = 0
@@ -213,25 +216,32 @@ class MarketData:
                     print()
 
                     # -------------------------
-                    # Update EMA 20
+                    # Update EMAs
                     # -------------------------
 
-                    ema_value = (
-                        self.ema20.update(
+                    ema_values = {}
+
+                    for period, ema in self.emas.items():
+
+                        ema_value = ema.update(
                             completed_candle
                         )
-                    )
 
-                    if ema_value is not None:
+                        if ema_value is not None:
+                            ema_values[period] = ema_value
+
+                    if ema_values:
 
                         print("=" * 60)
-                        print("EMA 20")
+                        print("EMA INDICATORS")
                         print("=" * 60)
 
-                        print(
-                            f"EMA 20 : "
-                            f"{ema_value:.2f}"
-                        )
+                        for period, ema_value in ema_values.items():
+
+                            print(
+                                f"EMA {period} : "
+                                f"{ema_value:.2f}"
+                            )
 
                         print()
 
