@@ -35,6 +35,9 @@ class MarketData:
             period=20
         )
 
+        # Completed candle counter
+        self.completed_candle_count = 0
+
     # ==================================================
     # Historical Data
     # ==================================================
@@ -75,7 +78,6 @@ class MarketData:
             raise ValueError(
                 f"Unsupported interval: {interval}"
             )
-        
         instrument_token = (
             self.instruments.get_instrument_token(
                 symbol
@@ -157,12 +159,6 @@ class MarketData:
                     )
                 )
 
-                current_candle = (
-                    result[
-                        "current_candle"
-                    ]
-                )
-
                 completed_candle = (
                     result[
                         "completed_candle"
@@ -170,10 +166,55 @@ class MarketData:
                 )
 
                 # -------------------------
-                # Update EMA
+                # Completed Candle
                 # -------------------------
 
                 if completed_candle is not None:
+
+                    self.completed_candle_count += 1
+
+                    print()
+                    print("=" * 60)
+                    print(
+                        f"COMPLETED 1-MINUTE CANDLE "
+                        f"#{self.completed_candle_count}"
+                    )
+                    print("=" * 60)
+
+                    print(
+                        f"Symbol : {symbol}"
+                    )
+
+                    print(
+                        f"Time   : "
+                        f"{completed_candle.time}"
+                    )
+
+                    print(
+                        f"Open   : "
+                        f"{completed_candle.open}"
+                    )
+
+                    print(
+                        f"High   : "
+                        f"{completed_candle.high}"
+                    )
+
+                    print(
+                        f"Low    : "
+                        f"{completed_candle.low}"
+                    )
+
+                    print(
+                        f"Close  : "
+                        f"{completed_candle.close}"
+                    )
+
+                    print()
+
+                    # -------------------------
+                    # Update EMA 20
+                    # -------------------------
 
                     ema_value = (
                         self.ema20.update(
@@ -183,49 +224,36 @@ class MarketData:
 
                     if ema_value is not None:
 
-                        print()
-                        print(
-                            "=" * 60
-                        )
+                        print("=" * 60)
+                        print("EMA 20")
+                        print("=" * 60)
 
                         print(
                             f"EMA 20 : "
                             f"{ema_value:.2f}"
                         )
 
-                        print(
-                            "=" * 60
-                        )
+                        print()
 
-                print("=" * 60)
-                print("CURRENT CANDLE")
-                print("=" * 60)
+                # -------------------------
+                # Current Candle
+                # -------------------------
 
-                print(
-                    f"Symbol : {symbol}"
+                current_candle = (
+                    result[
+                        "current_candle"
+                    ]
                 )
 
-                print(
-                    f"Open   : "
-                    f"{current_candle.open}"
-                )
+                # -------------------------
+                # WebSocket Tick Received
+                # -------------------------
 
-                print(
-                    f"High   : "
-                    f"{current_candle.high}"
-                )
-
-                print(
-                    f"Low    : "
-                    f"{current_candle.low}"
-                )
-
-                print(
-                    f"Close  : "
-                    f"{current_candle.close}"
-                )
-
-                print()
+                # Current candle is intentionally
+                # not printed for every tick.
+                # This keeps terminal output clean
+                # and makes candle completion easier
+                # to verify.
 
         def on_close(
             ws,
