@@ -8,7 +8,7 @@ from core.config import (
 )
 
 from trading.ohlc import OHLCBuilder
-from trading.ema import EMA
+from trading.indicator_engine import IndicatorEngine
 
 
 class MarketData:
@@ -31,12 +31,7 @@ class MarketData:
         self.ohlc = OHLCBuilder()
 
         # Indicators
-        self.emas = {
-            period: EMA(
-                period=period
-            )
-            for period in [10, 20, 50, 100, 200]
-        }
+        self.indicator_engine = IndicatorEngine()
 
         # Completed candle counter
         self.completed_candle_count = 0
@@ -216,19 +211,14 @@ class MarketData:
                     print()
 
                     # -------------------------
-                    # Update EMAs
+                    # Update Indicators
                     # -------------------------
 
-                    ema_values = {}
-
-                    for period, ema in self.emas.items():
-
-                        ema_value = ema.update(
+                    ema_values = (
+                        self.indicator_engine.update(
                             completed_candle
                         )
-
-                        if ema_value is not None:
-                            ema_values[period] = ema_value
+                    )
 
                     if ema_values:
 
