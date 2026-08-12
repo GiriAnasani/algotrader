@@ -207,7 +207,7 @@ class MarketData:
             )
 
             ws.set_mode(
-                ws.MODE_LTP,
+                ws.MODE_FULL,
                 [instrument_token]
             )
 

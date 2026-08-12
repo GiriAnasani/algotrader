@@ -1,6 +1,12 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from trading.candle import Candle
+
+
+EXCHANGE_TIMEZONE = ZoneInfo(
+    "Asia/Kolkata"
+)
 
 
 class OHLCBuilder:
@@ -27,6 +33,9 @@ class OHLCBuilder:
         # Configuration
         self.interval_seconds = interval_seconds
         self.max_candles = max_candles
+
+        # Exchange timestamp timezone
+        self.exchange_timezone = EXCHANGE_TIMEZONE
 
         # Current candle start time
         self.candle_start_time = None
@@ -62,7 +71,7 @@ class OHLCBuilder:
         tick
     ):
         """
-        Extracts price and timestamp.
+        Extracts price and exchange timestamp.
         """
 
         price = tick["last_price"]
@@ -72,18 +81,54 @@ class OHLCBuilder:
         )
 
         if timestamp is None:
-
-            timestamp = tick.get(
-                "timestamp"
+            raise KeyError(
+                "Tick does not contain "
+                "'exchange_timestamp'."
             )
-
-        if timestamp is None:
-
-            timestamp = datetime.now()
 
         return (
             price,
-            timestamp
+            self._normalize_timestamp(
+                timestamp
+            )
+        )
+
+    def _normalize_timestamp(
+        self,
+        timestamp
+    ):
+        """
+        Normalizes timestamps to the exchange timezone.
+        """
+
+        if not isinstance(
+            timestamp,
+            datetime
+        ):
+            raise TypeError(
+                "Exchange timestamp must be a datetime."
+            )
+
+        if timestamp.tzinfo is None:
+            return timestamp.replace(
+                tzinfo=self.exchange_timezone
+            )
+
+        return timestamp.astimezone(
+            self.exchange_timezone
+        )
+
+    def _get_minute_bucket(
+        self,
+        timestamp
+    ):
+        """
+        Returns the canonical exchange-minute start.
+        """
+
+        return timestamp.replace(
+            second=0,
+            microsecond=0
         )
 
     def _create_new_candle(
@@ -127,21 +172,16 @@ class OHLCBuilder:
         timestamp
     ):
         """
-        Checks whether the current candle
-        has completed.
+        Checks whether a new exchange-minute
+        candle has started.
         """
 
         if self.candle_start_time is None:
             return False
 
-        elapsed = (
-            timestamp -
-            self.candle_start_time
-        ).total_seconds()
-
         return (
-            elapsed >=
-            self.interval_seconds
+            timestamp >
+            self.candle_start_time
         )
 
     def _finalize_candle(
@@ -194,6 +234,10 @@ class OHLCBuilder:
             )
         )
 
+        minute_bucket = self._get_minute_bucket(
+            timestamp
+        )
+
         # ---------------------------------
         # Create First Candle
         # ---------------------------------
@@ -202,7 +246,7 @@ class OHLCBuilder:
 
             self._create_new_candle(
                 price,
-                timestamp
+                minute_bucket
             )
 
             return {
@@ -216,15 +260,21 @@ class OHLCBuilder:
         # Check Candle Completion
         # ---------------------------------
 
+        if minute_bucket < self.candle_start_time:
+            raise ValueError(
+                "Tick belongs to an earlier "
+                "exchange-minute bucket."
+            )
+
         if self._is_candle_complete(
-            timestamp
+            minute_bucket
         ):
 
             self._finalize_candle()
 
             self._create_new_candle(
                 price,
-                timestamp
+                minute_bucket
             )
 
             return {
