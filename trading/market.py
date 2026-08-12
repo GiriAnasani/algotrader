@@ -9,6 +9,7 @@ from core.config import (
 
 from trading.ohlc import OHLCBuilder
 from trading.indicator_engine import IndicatorEngine
+from trading.historical import historical_row_to_candle
 
 
 class MarketData:
@@ -39,6 +40,78 @@ class MarketData:
     # ==================================================
     # Historical Data
     # ==================================================
+
+    def warm_indicators_from_history(
+        self,
+        symbol,
+        days=30
+    ):
+        """
+        Warms indicators with historical 1-minute candles.
+        """
+
+        historical_data = self.get_history(
+            symbol,
+            interval="minute",
+            days=days
+        )
+
+        return self.warm_indicators_from_dataframe(
+            historical_data
+        )
+
+    def warm_indicators_from_dataframe(
+        self,
+        historical_data
+    ):
+        """
+        Warms indicators from historical candle data.
+        """
+
+        if not isinstance(
+            historical_data,
+            pd.DataFrame
+        ):
+            raise TypeError(
+                "Historical data must be a pandas DataFrame."
+            )
+
+        if historical_data.empty:
+            raise ValueError(
+                "Historical data is empty."
+            )
+
+        if "date" not in historical_data.columns:
+            raise KeyError(
+                "Historical data is missing 'date'."
+            )
+
+        ordered_data = historical_data.sort_values(
+            "date",
+            kind="stable"
+        )
+
+        indicator_values = {}
+        processed_candles = 0
+
+        for row in ordered_data.to_dict("records"):
+
+            candle = historical_row_to_candle(
+                row
+            )
+
+            indicator_values = (
+                self.indicator_engine.update(
+                    candle
+                )
+            )
+
+            processed_candles += 1
+
+        return {
+            "processed_candles": processed_candles,
+            "indicator_values": indicator_values
+        }
 
     def get_history(
         self,
