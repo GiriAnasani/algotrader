@@ -7,9 +7,13 @@ from core.config import (
     KITE_API_KEY
 )
 
-from trading.ohlc import OHLCBuilder
+from trading.ohlc import (
+    OHLCBuilder,
+    EXCHANGE_TIMEZONE,
+)
 from trading.indicator_engine import IndicatorEngine
 from trading.historical import historical_row_to_candle
+from trading.candle import Candle
 
 
 class MarketData:
@@ -34,8 +38,82 @@ class MarketData:
         # Indicators
         self.indicator_engine = IndicatorEngine()
 
+        # Processed completed candle identities
+        self.processed_candle_times = set()
+
         # Completed candle counter
         self.completed_candle_count = 0
+
+    def _get_candle_identity(
+        self,
+        candle
+    ):
+        """
+        Returns the canonical candle identity.
+        """
+
+        if not isinstance(
+            candle,
+            Candle
+        ):
+            raise TypeError(
+                "Expected Candle object."
+            )
+
+        if not isinstance(
+            candle.time,
+            datetime
+        ):
+            raise TypeError(
+                "Candle time must be a datetime."
+            )
+
+        if candle.time.tzinfo is None:
+            raise ValueError(
+                "Candle time must be timezone-aware."
+            )
+
+        identity = candle.time.astimezone(
+            EXCHANGE_TIMEZONE
+        )
+
+        if identity.second != 0 or identity.microsecond != 0:
+            raise ValueError(
+                "Candle time must be exchange-minute aligned."
+            )
+
+        return identity
+
+    def _process_completed_candle(
+        self,
+        candle
+    ):
+        """
+        Processes one completed candle at most once.
+        """
+
+        candle_time = self._get_candle_identity(
+            candle
+        )
+
+        if candle_time in self.processed_candle_times:
+            return {
+                "processed": False,
+                "indicator_values": {}
+            }
+
+        indicator_values = self.indicator_engine.update(
+            candle
+        )
+
+        self.processed_candle_times.add(
+            candle_time
+        )
+
+        return {
+            "processed": True,
+            "indicator_values": indicator_values
+        }
 
     # ==================================================
     # Historical Data
@@ -93,6 +171,15 @@ class MarketData:
 
         indicator_values = {}
         processed_candles = 0
+        skipped_current_candles = 0
+        skipped_duplicate_candles = 0
+
+        current_minute = datetime.now(
+            EXCHANGE_TIMEZONE
+        ).replace(
+            second=0,
+            microsecond=0
+        )
 
         for row in ordered_data.to_dict("records"):
 
@@ -100,17 +187,29 @@ class MarketData:
                 row
             )
 
-            indicator_values = (
-                self.indicator_engine.update(
-                    candle
-                )
+            candle_time = self._get_candle_identity(
+                candle
             )
 
-            processed_candles += 1
+            if candle_time == current_minute:
+                skipped_current_candles += 1
+                continue
+
+            result = self._process_completed_candle(
+                candle
+            )
+
+            if result["processed"]:
+                indicator_values = result["indicator_values"]
+                processed_candles += 1
+            else:
+                skipped_duplicate_candles += 1
 
         return {
             "processed_candles": processed_candles,
-            "indicator_values": indicator_values
+            "indicator_values": indicator_values,
+            "skipped_current_candles": skipped_current_candles,
+            "skipped_duplicate_candles": skipped_duplicate_candles
         }
 
     def get_history(
@@ -287,11 +386,23 @@ class MarketData:
                     # Update Indicators
                     # -------------------------
 
-                    ema_values = (
-                        self.indicator_engine.update(
+                    processing_result = (
+                        self._process_completed_candle(
                             completed_candle
                         )
                     )
+
+                    if processing_result["processed"]:
+
+                        ema_values = (
+                            processing_result[
+                                "indicator_values"
+                            ]
+                        )
+
+                    else:
+
+                        ema_values = {}
 
                     if ema_values:
 

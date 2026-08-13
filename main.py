@@ -18,6 +18,10 @@ def main():
         instruments
     )
 
+    market.warm_indicators_from_history(
+        "RELIANCE"
+    )
+
     market.connect_live(
         "RELIANCE"
     )
