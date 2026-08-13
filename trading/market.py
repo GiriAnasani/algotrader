@@ -14,6 +14,10 @@ from trading.ohlc import (
 from trading.indicator_engine import IndicatorEngine
 from trading.historical import historical_row_to_candle
 from trading.candle import Candle
+from trading.strategy import (
+    IndicatorSnapshot,
+    StrategyEngine,
+)
 
 
 class MarketData:
@@ -37,6 +41,10 @@ class MarketData:
 
         # Indicators
         self.indicator_engine = IndicatorEngine()
+
+        # Strategy
+        self.strategy_engine = StrategyEngine()
+        self.latest_strategy_result = None
 
         # Processed completed candle identities
         self.processed_candle_times = set()
@@ -400,6 +408,23 @@ class MarketData:
                             ]
                         )
 
+                        snapshot = IndicatorSnapshot(
+                            candle=completed_candle,
+                            values={
+                                "ema": ema_values
+                            }
+                        )
+
+                        strategy_result = (
+                            self.strategy_engine.evaluate(
+                                snapshot
+                            )
+                        )
+
+                        self.latest_strategy_result = (
+                            strategy_result
+                        )
+
                     else:
 
                         ema_values = {}
@@ -416,6 +441,34 @@ class MarketData:
                                 f"EMA {period} : "
                                 f"{ema_value:.2f}"
                             )
+
+                        print()
+
+                    if processing_result["processed"]:
+
+                        print("=" * 60)
+                        print("STRATEGY RESULT")
+                        print("=" * 60)
+
+                        print(
+                            f"Strategy : "
+                            f"{strategy_result.strategy_name}"
+                        )
+
+                        print(
+                            f"Action   : "
+                            f"{strategy_result.action.value}"
+                        )
+
+                        print(
+                            f"Candle   : "
+                            f"{strategy_result.candle_time}"
+                        )
+
+                        print(
+                            f"Reason   : "
+                            f"{strategy_result.reason}"
+                        )
 
                         print()
 
