@@ -52,6 +52,74 @@ class MarketData:
         # Completed candle counter
         self.completed_candle_count = 0
 
+        # C7 NIFTY option subscription and premium state
+        self.nifty_index_token = None
+        self.nifty_option_pair = None
+        self.option_tokens = {}
+        self.latest_option_premiums = {}
+
+    def _select_nifty_option_pair(
+        self,
+        ws,
+        spot_price
+    ):
+        """
+        Selects and subscribes the session's ATM NIFTY option pair.
+        """
+
+        if self.nifty_option_pair is not None:
+            return self.nifty_option_pair
+
+        option_pair = self.instruments.get_nifty_option_pair(
+            spot_price
+        )
+
+        tokens = {
+            "CE": option_pair["CE"]["instrument_token"],
+            "PE": option_pair["PE"]["instrument_token"]
+        }
+
+        ws.subscribe(list(tokens.values()))
+        ws.set_mode(ws.MODE_FULL, list(tokens.values()))
+
+        self.nifty_option_pair = option_pair
+        self.option_tokens = {
+            token: option_type
+            for option_type, token in tokens.items()
+        }
+
+        print(
+            "Selected NIFTY ATM option pair: "
+            f"{option_pair['CE']['tradingsymbol']} / "
+            f"{option_pair['PE']['tradingsymbol']}"
+        )
+
+        return option_pair
+
+    def _cache_option_premium(
+        self,
+        tick
+    ):
+        """
+        Caches a subscribed option's latest valid premium.
+        """
+
+        option_type = self.option_tokens.get(
+            tick.get("instrument_token")
+        )
+
+        if option_type is None:
+            return False
+
+        premium = tick.get("last_price")
+
+        if not isinstance(premium, (int, float)) or premium <= 0:
+            return False
+
+        self.latest_option_premiums[option_type] = float(premium)
+
+        return True
+
     def _get_candle_identity(
         self,
         candle
@@ -286,11 +354,13 @@ class MarketData:
         symbol
     ):
 
-        instrument_token = (
-            self.instruments.get_instrument_token(
-                symbol
-            )
-        )
+        symbol = symbol.strip().upper()
+
+        if symbol != "NIFTY 50":
+            raise ValueError("C7 live data is configured for NIFTY 50 only.")
+
+        instrument_token = self.instruments.get_nifty_index_token()
+        self.nifty_index_token = instrument_token
 
         kws = KiteTicker(
             KITE_API_KEY,
@@ -330,6 +400,17 @@ class MarketData:
         ):
 
             for tick in ticks:
+
+                if self._cache_option_premium(tick):
+                    continue
+
+                if tick.get("instrument_token") != instrument_token:
+                    continue
+
+                self._select_nifty_option_pair(
+                    ws,
+                    tick.get("last_price")
+                )
 
                 result = (
                     self.ohlc.process_tick(
@@ -417,7 +498,10 @@ class MarketData:
 
                         strategy_result = (
                             self.strategy_engine.evaluate(
-                                snapshot
+                                snapshot,
+                                option_premiums=dict(
+                                    self.latest_option_premiums
+                                )
                             )
                         )
 

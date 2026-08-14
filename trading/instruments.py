@@ -1,5 +1,10 @@
 import pandas as pd
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+EXCHANGE_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 
 class InstrumentManager:
@@ -259,6 +264,109 @@ class InstrumentManager:
         )
 
         return self._format_output(results)
+
+    def get_nifty_index_token(self):
+        """
+        Returns the NSE NIFTY 50 index instrument token.
+        """
+
+        results = self._find_instruments(
+            tradingsymbol="NIFTY 50",
+            name="NIFTY 50",
+            exchange="NSE",
+            segment="INDICES",
+            instrument_type="EQ"
+        )
+
+        if len(results) != 1:
+            raise ValueError(
+                "Expected exactly one NIFTY 50 index instrument."
+            )
+
+        return int(results.iloc[0]["instrument_token"])
+
+    def get_nifty_option_pair(
+        self,
+        spot_price,
+        as_of=None
+    ):
+        """
+        Returns the nearest-expiry ATM NIFTY CE and PE contracts.
+
+        The earliest unexpired NIFTY option expiry is used as the
+        nearest weekly expiry.  The instrument CSV does not provide a
+        separate weekly-expiry flag.
+        """
+
+        if not isinstance(spot_price, (int, float)):
+            raise TypeError("NIFTY spot price must be a number.")
+
+        if spot_price <= 0:
+            raise ValueError("NIFTY spot price must be greater than zero.")
+
+        if as_of is None:
+            as_of = datetime.now(EXCHANGE_TIMEZONE).date()
+        elif isinstance(as_of, datetime):
+            as_of = as_of.date()
+        elif not isinstance(as_of, date):
+            raise TypeError("as_of must be a date or datetime.")
+
+        atm_strike = round(spot_price / 50) * 50
+
+        df = self.load_instruments()
+        options = df[
+            (df["name"] == "NIFTY")
+            & (df["exchange"] == "NFO")
+            & (df["segment"] == "NFO-OPT")
+            & (df["instrument_type"].isin(["CE", "PE"]))
+        ].copy()
+
+        options["expiry"] = pd.to_datetime(
+            options["expiry"],
+            errors="coerce"
+        ).dt.date
+
+        options = options[
+            options["expiry"].notna()
+            & (options["expiry"] >= as_of)
+        ]
+
+        if options.empty:
+            raise ValueError("No unexpired NIFTY option contracts found.")
+
+        expiry = options["expiry"].min()
+        pair = options[
+            (options["expiry"] == expiry)
+            & (options["strike"] == float(atm_strike))
+        ]
+
+        selected = {}
+
+        for option_type in ("CE", "PE"):
+            contracts = pair[
+                pair["instrument_type"] == option_type
+            ]
+
+            if len(contracts) != 1:
+                raise ValueError(
+                    f"Expected exactly one NIFTY {option_type} contract "
+                    f"for expiry {expiry} and strike {atm_strike}."
+                )
+
+            contract = contracts.iloc[0]
+            selected[option_type] = {
+                "instrument_token": int(contract["instrument_token"]),
+                "tradingsymbol": contract["tradingsymbol"],
+                "expiry": expiry,
+                "strike": float(contract["strike"])
+            }
+
+        return {
+            "expiry": expiry,
+            "strike": float(atm_strike),
+            "CE": selected["CE"],
+            "PE": selected["PE"]
+        }
 
     def get_instrument_token(self, symbol):
         """

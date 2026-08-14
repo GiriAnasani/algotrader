@@ -19,11 +19,11 @@ def main():
     )
 
     market.warm_indicators_from_history(
-        "RELIANCE"
+        "NIFTY 50"
     )
 
     market.connect_live(
-        "RELIANCE"
+        "NIFTY 50"
     )
 
 
