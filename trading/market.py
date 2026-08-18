@@ -1,5 +1,6 @@
 import pandas as pd
 from datetime import datetime, timedelta
+from time import monotonic
 
 from kiteconnect import KiteTicker
 
@@ -57,6 +58,13 @@ class MarketData:
         self.nifty_option_pair = None
         self.option_tokens = {}
         self.latest_option_premiums = {}
+
+        # C8 live monitoring state
+        self.latest_nifty_spot = None
+        self.latest_indicator_values = {}
+        self.latest_completed_snapshot = None
+        self.last_position_display_time = None
+        self.position_display_interval_seconds = 1.0
 
     def _select_nifty_option_pair(
         self,
@@ -119,6 +127,159 @@ class MarketData:
         self.latest_option_premiums[option_type] = float(premium)
 
         return True
+
+    def _format_price(
+        self,
+        value,
+        signed=False
+    ):
+        """
+        Formats a premium value for the console.
+        """
+
+        if value is None:
+            return "N/A"
+
+        prefix = "+" if signed and value >= 0 else ""
+
+        return f"Rs {prefix}{value:.2f}"
+
+    def _display_strategy_scan(
+        self,
+        snapshot,
+        indicator_values,
+        strategy_result
+    ):
+        """
+        Displays the completed-candle strategy scan panel.
+        """
+
+        print()
+        print("=" * 60)
+        print("STRATEGY SCAN")
+        print("=" * 60)
+        print(f"NIFTY 50 Close : {snapshot.candle.close:.2f}")
+
+        for period in (10, 20, 50, 100, 200):
+            value = indicator_values.get(period)
+            formatted_value = (
+                f"{value:.2f}"
+                if value is not None
+                else "N/A"
+            )
+            print(f"EMA {period:<3}        : {formatted_value}")
+
+        print(f"Strategy       : {strategy_result.strategy_name}")
+        print(f"Signal         : {strategy_result.action.value}")
+        print(f"Reason         : {strategy_result.reason}")
+        print("=" * 60)
+
+    def _display_active_position(
+        self,
+        force=False
+    ):
+        """
+        Displays the active option position at most once per second.
+        """
+
+        side = self.strategy_engine.active_position
+
+        if side is None:
+            return
+
+        now = monotonic()
+
+        if (
+            not force
+            and self.last_position_display_time is not None
+            and now - self.last_position_display_time
+            < self.position_display_interval_seconds
+        ):
+            return
+
+        entry_price = self.strategy_engine.entry_premium
+        current_price = self.latest_option_premiums.get(side)
+        target_price = entry_price + self.strategy_engine.target_points
+        pnl = (
+            current_price - entry_price
+            if current_price is not None
+            else None
+        )
+        contract = self.nifty_option_pair[side]["tradingsymbol"]
+        ema10 = self.latest_indicator_values.get(10)
+        spot = self.latest_nifty_spot
+
+        print()
+        print("=" * 60)
+        print("ACTIVE POSITION")
+        print("=" * 60)
+        print(f"Option         : {contract}")
+        print(f"Side           : {side}")
+        print(f"Entry Price    : {self._format_price(entry_price)}")
+        print(f"Target Price   : {self._format_price(target_price)}")
+        print(f"Current Price  : {self._format_price(current_price)}")
+        print(f"P&L            : {self._format_price(pnl, signed=True)}")
+        print(
+            "NIFTY Spot     : "
+            f"{spot:.2f}" if spot is not None else "NIFTY Spot     : N/A"
+        )
+        print(
+            "EMA 10         : "
+            f"{ema10:.2f}" if ema10 is not None else "EMA 10         : N/A"
+        )
+        print("Status         : ACTIVE")
+        print(
+            "Last Update    : "
+            f"{datetime.now(EXCHANGE_TIMEZONE):%H:%M:%S}"
+        )
+        print("=" * 60)
+
+        self.last_position_display_time = now
+
+    def _monitor_live_option_target(
+        self
+    ):
+        """
+        Checks the active option target from its live premium stream.
+        """
+
+        if (
+            self.strategy_engine.active_position is None
+            or self.latest_completed_snapshot is None
+        ):
+            return None
+
+        strategy_result = self.strategy_engine.evaluate_live_option_target(
+            self.latest_completed_snapshot,
+            option_premiums=dict(self.latest_option_premiums)
+        )
+
+        if strategy_result is not None:
+            self.latest_strategy_result = strategy_result
+            self.last_position_display_time = None
+            print(
+                f"Position closed: {strategy_result.reason}"
+            )
+
+        return strategy_result
+
+    def _handle_option_tick(
+        self,
+        tick
+    ):
+        """
+        Monitors only the active option from live option ticks.
+        """
+
+        option_type = self.option_tokens.get(
+            tick.get("instrument_token")
+        )
+
+        if option_type != self.strategy_engine.active_position:
+            return
+
+        if self._monitor_live_option_target() is None:
+            self._display_active_position()
 
     def _get_candle_identity(
         self,
@@ -402,10 +563,13 @@ class MarketData:
             for tick in ticks:
 
                 if self._cache_option_premium(tick):
+                    self._handle_option_tick(tick)
                     continue
 
                 if tick.get("instrument_token") != instrument_token:
                     continue
+
+                self.latest_nifty_spot = tick.get("last_price")
 
                 self._select_nifty_option_pair(
                     ws,
@@ -432,45 +596,6 @@ class MarketData:
 
                     self.completed_candle_count += 1
 
-                    print()
-                    print("=" * 60)
-                    print(
-                        f"COMPLETED 1-MINUTE CANDLE "
-                        f"#{self.completed_candle_count}"
-                    )
-                    print("=" * 60)
-
-                    print(
-                        f"Symbol : {symbol}"
-                    )
-
-                    print(
-                        f"Time   : "
-                        f"{completed_candle.time}"
-                    )
-
-                    print(
-                        f"Open   : "
-                        f"{completed_candle.open}"
-                    )
-
-                    print(
-                        f"High   : "
-                        f"{completed_candle.high}"
-                    )
-
-                    print(
-                        f"Low    : "
-                        f"{completed_candle.low}"
-                    )
-
-                    print(
-                        f"Close  : "
-                        f"{completed_candle.close}"
-                    )
-
-                    print()
-
                     # -------------------------
                     # Update Indicators
                     # -------------------------
@@ -496,6 +621,9 @@ class MarketData:
                             }
                         )
 
+                        self.latest_completed_snapshot = snapshot
+                        self.latest_indicator_values = ema_values
+
                         strategy_result = (
                             self.strategy_engine.evaluate(
                                 snapshot,
@@ -509,52 +637,18 @@ class MarketData:
                             strategy_result
                         )
 
+                        if self.strategy_engine.active_position is None:
+                            self._display_strategy_scan(
+                                snapshot,
+                                ema_values,
+                                strategy_result
+                            )
+                        else:
+                            self._display_active_position(force=True)
+
                     else:
 
                         ema_values = {}
-
-                    if ema_values:
-
-                        print("=" * 60)
-                        print("EMA INDICATORS")
-                        print("=" * 60)
-
-                        for period, ema_value in ema_values.items():
-
-                            print(
-                                f"EMA {period} : "
-                                f"{ema_value:.2f}"
-                            )
-
-                        print()
-
-                    if processing_result["processed"]:
-
-                        print("=" * 60)
-                        print("STRATEGY RESULT")
-                        print("=" * 60)
-
-                        print(
-                            f"Strategy : "
-                            f"{strategy_result.strategy_name}"
-                        )
-
-                        print(
-                            f"Action   : "
-                            f"{strategy_result.action.value}"
-                        )
-
-                        print(
-                            f"Candle   : "
-                            f"{strategy_result.candle_time}"
-                        )
-
-                        print(
-                            f"Reason   : "
-                            f"{strategy_result.reason}"
-                        )
-
-                        print()
 
                 # -------------------------
                 # Current Candle

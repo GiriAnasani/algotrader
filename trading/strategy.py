@@ -216,6 +216,50 @@ class StrategyEngine:
 
         return result
 
+    def evaluate_live_option_target(
+        self,
+        snapshot: IndicatorSnapshot,
+        option_premiums=None
+    ) -> StrategyResult | None:
+        """
+        Checks the existing option target without evaluating EMA rules.
+
+        This is used by live option ticks.  EMA entry and reversal
+        decisions remain exclusive to completed NIFTY candles.
+        """
+
+        if not isinstance(
+            snapshot,
+            IndicatorSnapshot
+        ):
+            raise TypeError(
+                "Expected IndicatorSnapshot object."
+            )
+
+        premiums = self._validate_option_premiums(
+            option_premiums
+        )
+
+        if self.active_position == "CE":
+            if self._target_reached(premiums.get("CE")):
+                self._clear_position()
+                return self._result(
+                    snapshot,
+                    SignalAction.EXIT_CE,
+                    "CE target reached."
+                )
+
+        elif self.active_position == "PE":
+            if self._target_reached(premiums.get("PE")):
+                self._clear_position()
+                return self._result(
+                    snapshot,
+                    SignalAction.EXIT_PE,
+                    "PE target reached."
+                )
+
+        return None
+
     def _validate_option_premiums(
         self,
         option_premiums
