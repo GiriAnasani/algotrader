@@ -358,7 +358,8 @@ class InstrumentManager:
                 "instrument_token": int(contract["instrument_token"]),
                 "tradingsymbol": contract["tradingsymbol"],
                 "expiry": expiry,
-                "strike": float(contract["strike"])
+                "strike": float(contract["strike"]),
+                "lot_size": int(contract["lot_size"]),
             }
 
         return {

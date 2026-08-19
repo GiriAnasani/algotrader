@@ -19,6 +19,8 @@ from trading.strategy import (
     IndicatorSnapshot,
     StrategyEngine,
 )
+from trading.paper_execution import PaperExecutionEngine
+from trading.strategy import SignalAction
 
 
 class MarketData:
@@ -46,6 +48,7 @@ class MarketData:
         # Strategy
         self.strategy_engine = StrategyEngine()
         self.latest_strategy_result = None
+        self.paper_execution_engine = PaperExecutionEngine()
 
         # Processed completed candle identities
         self.processed_candle_times = set()
@@ -58,6 +61,7 @@ class MarketData:
         self.nifty_option_pair = None
         self.option_tokens = {}
         self.latest_option_premiums = {}
+        self.latest_option_timestamps = {}
 
         # C8 live monitoring state
         self.latest_nifty_spot = None
@@ -125,8 +129,83 @@ class MarketData:
             return False
 
         self.latest_option_premiums[option_type] = float(premium)
+        timestamp = tick.get("exchange_timestamp")
+        if timestamp is not None:
+            self.latest_option_timestamps[option_type] = (
+                self._normalize_execution_time(timestamp)
+            )
 
         return True
+
+    @staticmethod
+    def _normalize_execution_time(timestamp):
+        """Normalizes an exchange timestamp for paper execution."""
+        if not isinstance(timestamp, datetime):
+            raise TypeError("Exchange timestamp must be a datetime.")
+
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            return timestamp.replace(tzinfo=EXCHANGE_TIMEZONE)
+
+        return timestamp.astimezone(EXCHANGE_TIMEZONE)
+
+    def _execute_strategy_result(self, strategy_result, execution_time):
+        """Routes ordered strategy actions into the paper execution engine."""
+        if strategy_result is None or strategy_result.action is SignalAction.HOLD:
+            return ()
+
+        execution_time = self._normalize_execution_time(execution_time)
+        positions = []
+
+        for action in strategy_result.actions:
+            if action is SignalAction.HOLD:
+                continue
+
+            side = "CE" if action in (
+                SignalAction.BUY_CE,
+                SignalAction.EXIT_CE,
+            ) else "PE"
+            premium = self.latest_option_premiums.get(side)
+
+            if action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
+                if self.nifty_option_pair is None:
+                    raise ValueError("NIFTY option pair has not been selected.")
+
+                contract = self.nifty_option_pair[side]
+                position = self.paper_execution_engine.execute(
+                    action,
+                    contract_symbol=contract["tradingsymbol"],
+                    premium=premium,
+                    quantity=contract["lot_size"],
+                    execution_time=execution_time,
+                )
+            elif action in (SignalAction.EXIT_CE, SignalAction.EXIT_PE):
+                position = self.paper_execution_engine.execute(
+                    action,
+                    premium=premium,
+                    execution_time=execution_time,
+                )
+            else:
+                raise ValueError("Unsupported strategy action for paper execution.")
+
+            positions.append(position)
+            print(
+                f"PAPER {action.value}: {position.contract_symbol} "
+                f"@ Rs {premium:.2f}"
+            )
+
+        self._validate_paper_state_consistency()
+        return tuple(positions)
+
+    def _validate_paper_state_consistency(self):
+        """Ensures strategy and paper active-position state agree."""
+        strategy_side = self.strategy_engine.active_position
+        paper_position = self.paper_execution_engine.active_position
+        paper_side = paper_position.side if paper_position is not None else None
+
+        if strategy_side != paper_side:
+            raise RuntimeError(
+                "Strategy and paper execution position states are inconsistent."
+            )
 
     def _format_price(
         self,
@@ -237,7 +316,8 @@ class MarketData:
         self.last_position_display_time = now
 
     def _monitor_live_option_target(
-        self
+        self,
+        execution_time=None,
     ):
         """
         Checks the active option target from its live premium stream.
@@ -249,6 +329,8 @@ class MarketData:
         ):
             return None
 
+        active_side = self.strategy_engine.active_position
+
         strategy_result = self.strategy_engine.evaluate_live_option_target(
             self.latest_completed_snapshot,
             option_premiums=dict(self.latest_option_premiums)
@@ -256,6 +338,18 @@ class MarketData:
 
         if strategy_result is not None:
             self.latest_strategy_result = strategy_result
+            if execution_time is None:
+                execution_time = self.latest_option_timestamps.get(
+                    active_side
+                )
+
+            if execution_time is None:
+                execution_time = self.latest_completed_snapshot.candle.time
+
+            self._execute_strategy_result(
+                strategy_result,
+                execution_time,
+            )
             self.last_position_display_time = None
             print(
                 f"Position closed: {strategy_result.reason}"
@@ -278,7 +372,14 @@ class MarketData:
         if option_type != self.strategy_engine.active_position:
             return
 
-        if self._monitor_live_option_target() is None:
+        timestamp = tick.get("exchange_timestamp")
+        execution_time = (
+            self._normalize_execution_time(timestamp)
+            if timestamp is not None
+            else None
+        )
+
+        if self._monitor_live_option_target(execution_time) is None:
             self._display_active_position()
 
     def _get_candle_identity(
@@ -635,6 +736,13 @@ class MarketData:
 
                         self.latest_strategy_result = (
                             strategy_result
+                        )
+
+                        self._execute_strategy_result(
+                            strategy_result,
+                            self._normalize_execution_time(
+                                tick.get("exchange_timestamp")
+                            ),
                         )
 
                         if self.strategy_engine.active_position is None:
