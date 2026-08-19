@@ -20,6 +20,8 @@ from trading.strategy import (
     StrategyEngine,
 )
 from trading.paper_execution import PaperExecutionEngine
+from trading.paper_ledger import PaperTradeLedger
+from trading.paper_trade import PaperTrade
 from trading.strategy import SignalAction
 
 
@@ -49,6 +51,7 @@ class MarketData:
         self.strategy_engine = StrategyEngine()
         self.latest_strategy_result = None
         self.paper_execution_engine = PaperExecutionEngine()
+        self.paper_trade_ledger = PaperTradeLedger()
 
         # Processed completed candle identities
         self.processed_candle_times = set()
@@ -183,6 +186,20 @@ class MarketData:
                     action,
                     premium=premium,
                     execution_time=execution_time,
+                )
+                self.paper_trade_ledger.record(
+                    PaperTrade(
+                        contract_symbol=position.contract_symbol,
+                        side=position.side,
+                        quantity=position.quantity,
+                        entry_price=position.entry_price,
+                        entry_time=position.entry_time,
+                        exit_price=premium,
+                        exit_time=execution_time,
+                        exit_action=action,
+                        strategy_name=strategy_result.strategy_name,
+                        exit_reason=strategy_result.reason,
+                    )
                 )
             else:
                 raise ValueError("Unsupported strategy action for paper execution.")

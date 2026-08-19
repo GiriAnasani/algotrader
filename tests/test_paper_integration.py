@@ -65,6 +65,7 @@ def test_market_routes_buy_to_one_long_lived_paper_engine(
     assert paper_engine.active_position.entry_price == premium
     assert paper_engine.active_position.entry_time.tzinfo is not None
     assert paper_engine.active_position.status is PositionStatus.OPEN
+    assert market.paper_trade_ledger.count == 0
 
 
 def test_hold_causes_zero_paper_executions():
@@ -72,6 +73,7 @@ def test_hold_causes_zero_paper_executions():
 
     assert market._execute_strategy_result(result(SignalAction.HOLD), TIME) == ()
     assert market.paper_execution_engine.active_position is None
+    assert market.paper_trade_ledger.count == 0
 
 
 @pytest.mark.parametrize(
@@ -100,6 +102,16 @@ def test_market_routes_exit_to_active_paper_position(
 
     assert closed.status is PositionStatus.CLOSED
     assert market.paper_execution_engine.active_position is None
+    trade = market.paper_trade_ledger.get_latest_trade()
+    assert market.paper_trade_ledger.count == 1
+    assert trade.contract_symbol == closed.contract_symbol
+    assert trade.side == side
+    assert trade.quantity == closed.quantity
+    assert trade.entry_price == closed.entry_price
+    assert trade.entry_time == closed.entry_time
+    assert trade.exit_price == premium + 5
+    assert trade.exit_time == TIME + timedelta(minutes=1)
+    assert trade.exit_action is exit_action
 
 
 @pytest.mark.parametrize(
@@ -144,6 +156,8 @@ def test_reversal_executes_exit_then_buy_in_order(
     ]
     assert market.paper_execution_engine.active_position.side == next_side
     assert market.strategy_engine.active_position == next_side
+    assert market.paper_trade_ledger.count == 1
+    assert market.paper_trade_ledger.get_latest_trade().side == entry_side
 
 
 def test_target_generated_exit_closes_paper_position():
@@ -163,6 +177,7 @@ def test_target_generated_exit_closes_paper_position():
     assert strategy_result.action is SignalAction.EXIT_CE
     assert market.strategy_engine.active_position is None
     assert market.paper_execution_engine.active_position is None
+    assert market.paper_trade_ledger.count == 1
 
 
 def test_target_exit_uses_fallback_when_option_tick_has_no_timestamp():
@@ -180,6 +195,7 @@ def test_target_exit_uses_fallback_when_option_tick_has_no_timestamp():
 
     assert market.strategy_engine.active_position is None
     assert market.paper_execution_engine.active_position is None
+    assert market.paper_trade_ledger.count == 1
 
 
 def test_missing_buy_premium_cannot_create_paper_position():
@@ -191,6 +207,7 @@ def test_missing_buy_premium_cannot_create_paper_position():
         market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
 
     assert market.paper_execution_engine.active_position is None
+    assert market.paper_trade_ledger.count == 0
 
 
 def test_inconsistent_strategy_and_paper_state_raises_clearly():
@@ -227,6 +244,7 @@ def test_historical_warmup_causes_zero_paper_executions():
     market.warm_indicators_from_dataframe(history)
 
     assert market.paper_execution_engine.active_position is None
+    assert market.paper_trade_ledger.count == 0
 
 
 def test_duplicate_completed_candle_is_not_processed_twice():
@@ -236,3 +254,4 @@ def test_duplicate_completed_candle_is_not_processed_twice():
     assert market._process_completed_candle(candle)["processed"] is True
     assert market._process_completed_candle(candle)["processed"] is False
     assert market.paper_execution_engine.active_position is None
+    assert market.paper_trade_ledger.count == 0
