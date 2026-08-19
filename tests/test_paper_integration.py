@@ -8,6 +8,7 @@ from trading.candle import Candle
 from trading.market import MarketData
 from trading.paper_pnl import calculate_trade_pnl
 from trading.paper_position import PositionStatus
+from trading.paper_session import calculate_session_summary
 from trading.strategy import IndicatorSnapshot, SignalAction, StrategyResult
 
 
@@ -84,6 +85,10 @@ def test_buy_and_hold_do_not_calculate_realized_pnl(monkeypatch):
         raise AssertionError("BUY and HOLD must not calculate realized P&L.")
 
     monkeypatch.setattr("trading.market.calculate_trade_pnl", unexpected_pnl)
+    monkeypatch.setattr(
+        "trading.market.calculate_session_summary",
+        lambda trades: pytest.fail("BUY and HOLD must not calculate a session summary."),
+    )
     set_strategy_position(market, "CE", 27.0)
 
     market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
@@ -106,6 +111,7 @@ def test_market_routes_exit_to_active_paper_position(
 ):
     market = make_market()
     realized_pnls = []
+    session_summaries = []
 
     def record_pnl(trade):
         pnl = calculate_trade_pnl(trade)
@@ -113,6 +119,13 @@ def test_market_routes_exit_to_active_paper_position(
         return pnl
 
     monkeypatch.setattr("trading.market.calculate_trade_pnl", record_pnl)
+
+    def record_summary(trades):
+        summary = calculate_session_summary(trades)
+        session_summaries.append(summary)
+        return summary
+
+    monkeypatch.setattr("trading.market.calculate_session_summary", record_summary)
     set_strategy_position(market, side, premium)
     market._execute_strategy_result(result(buy_action), TIME)
     market.latest_option_premiums[side] = premium + 5
@@ -138,6 +151,7 @@ def test_market_routes_exit_to_active_paper_position(
     assert len(realized_pnls) == 1
     assert realized_pnls[0].points_pnl == 5.0
     assert realized_pnls[0].gross_pnl == 375.0
+    assert session_summaries[0].completed_trades == 1
 
 
 @pytest.mark.parametrize(
@@ -169,12 +183,19 @@ def test_reversal_executes_exit_then_buy_in_order(
 ):
     market = make_market()
     realized_trades = []
+    session_summaries = []
 
     def record_pnl(trade):
         realized_trades.append(trade)
         return calculate_trade_pnl(trade)
 
     monkeypatch.setattr("trading.market.calculate_trade_pnl", record_pnl)
+    monkeypatch.setattr(
+        "trading.market.calculate_session_summary",
+        lambda trades: session_summaries.append(
+            calculate_session_summary(trades)
+        ) or session_summaries[-1],
+    )
     set_strategy_position(market, entry_side, market.latest_option_premiums[entry_side])
     market._execute_strategy_result(result(entry_action), TIME)
     set_strategy_position(market, next_side, market.latest_option_premiums[next_side])
@@ -193,17 +214,25 @@ def test_reversal_executes_exit_then_buy_in_order(
     assert market.paper_trade_ledger.count == 1
     assert market.paper_trade_ledger.get_latest_trade().side == entry_side
     assert realized_trades == [market.paper_trade_ledger.get_latest_trade()]
+    assert session_summaries[-1].completed_trades == 1
 
 
 def test_target_generated_exit_closes_paper_position(monkeypatch):
     market = make_market()
     realized_trades = []
+    session_summaries = []
 
     def record_pnl(trade):
         realized_trades.append(trade)
         return calculate_trade_pnl(trade)
 
     monkeypatch.setattr("trading.market.calculate_trade_pnl", record_pnl)
+    monkeypatch.setattr(
+        "trading.market.calculate_session_summary",
+        lambda trades: session_summaries.append(
+            calculate_session_summary(trades)
+        ) or session_summaries[-1],
+    )
     set_strategy_position(market, "CE", 27.0)
     market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
     market.latest_completed_snapshot = IndicatorSnapshot(
@@ -221,6 +250,7 @@ def test_target_generated_exit_closes_paper_position(monkeypatch):
     assert market.paper_execution_engine.active_position is None
     assert market.paper_trade_ledger.count == 1
     assert realized_trades == [market.paper_trade_ledger.get_latest_trade()]
+    assert session_summaries[-1].completed_trades == 1
 
 
 def test_target_exit_uses_fallback_when_option_tick_has_no_timestamp():
@@ -274,6 +304,10 @@ def test_historical_warmup_causes_zero_paper_executions(monkeypatch):
         "trading.market.calculate_trade_pnl",
         lambda trade: pytest.fail("Historical warm-up must not calculate P&L."),
     )
+    monkeypatch.setattr(
+        "trading.market.calculate_session_summary",
+        lambda trades: pytest.fail("Historical warm-up must not calculate a session summary."),
+    )
     history = pd.DataFrame(
         [
             {
@@ -292,6 +326,9 @@ def test_historical_warmup_causes_zero_paper_executions(monkeypatch):
 
     assert market.paper_execution_engine.active_position is None
     assert market.paper_trade_ledger.count == 0
+    assert calculate_session_summary(
+        market.paper_trade_ledger.get_trades()
+    ).completed_trades == 0
 
 
 def test_duplicate_completed_candle_is_not_processed_twice(monkeypatch):
@@ -300,9 +337,16 @@ def test_duplicate_completed_candle_is_not_processed_twice(monkeypatch):
         "trading.market.calculate_trade_pnl",
         lambda trade: pytest.fail("Duplicate candle must not calculate P&L."),
     )
+    monkeypatch.setattr(
+        "trading.market.calculate_session_summary",
+        lambda trades: pytest.fail("Duplicate candle must not calculate a session summary."),
+    )
     candle = Candle(TIME, 100, 100, 100, 100)
 
     assert market._process_completed_candle(candle)["processed"] is True
     assert market._process_completed_candle(candle)["processed"] is False
     assert market.paper_execution_engine.active_position is None
     assert market.paper_trade_ledger.count == 0
+    assert calculate_session_summary(
+        market.paper_trade_ledger.get_trades()
+    ).completed_trades == 0

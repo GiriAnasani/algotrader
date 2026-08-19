@@ -22,6 +22,7 @@ from trading.strategy import (
 from trading.paper_execution import PaperExecutionEngine
 from trading.paper_ledger import PaperTradeLedger
 from trading.paper_pnl import calculate_trade_pnl
+from trading.paper_session import calculate_session_summary
 from trading.paper_trade import PaperTrade
 from trading.strategy import SignalAction
 
@@ -207,6 +208,18 @@ class MarketData:
                     f"PAPER REALIZED P&L: {position.contract_symbol} "
                     f"Points {pnl.points_pnl:+.2f}, "
                     f"Gross Rs {pnl.gross_pnl:+.2f}"
+                )
+                summary = calculate_session_summary(
+                    self.paper_trade_ledger.get_trades()
+                )
+                print(
+                    "PAPER SESSION: "
+                    f"Trades {summary.completed_trades}, "
+                    f"Wins {summary.winning_trades}, "
+                    f"Losses {summary.losing_trades}, "
+                    f"Flat {summary.flat_trades}, "
+                    f"Points {summary.total_points_pnl:+.2f}, "
+                    f"Gross Rs {summary.total_gross_pnl:+.2f}"
                 )
             else:
                 raise ValueError("Unsupported strategy action for paper execution.")
