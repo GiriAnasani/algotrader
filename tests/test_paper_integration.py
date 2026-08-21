@@ -5,6 +5,8 @@ import pandas as pd
 import pytest
 
 from trading.candle import Candle
+from trading.execution_mode import ExecutionMode
+from trading.execution_router import ExecutionRouter
 from trading.market import MarketData
 from trading.paper_pnl import calculate_trade_pnl
 from trading.paper_position import PositionStatus
@@ -55,11 +57,16 @@ def test_market_routes_buy_to_one_long_lived_paper_engine(
 ):
     market = make_market()
     paper_engine = market.paper_execution_engine
+    router = market.execution_router
     set_strategy_position(market, side, premium)
 
     positions = market._execute_strategy_result(result(action), TIME)
 
     assert market.paper_execution_engine is paper_engine
+    assert isinstance(router, ExecutionRouter)
+    assert router.mode is ExecutionMode.PAPER
+    assert router.paper_execution_engine is paper_engine
+    assert market.strategy_engine.target_points == 2.0
     assert len(positions) == 1
     assert paper_engine.active_position.contract_symbol == symbol
     assert paper_engine.active_position.side == side
@@ -68,6 +75,35 @@ def test_market_routes_buy_to_one_long_lived_paper_engine(
     assert paper_engine.active_position.entry_time.tzinfo is not None
     assert paper_engine.active_position.status is PositionStatus.OPEN
     assert market.paper_trade_ledger.count == 0
+
+
+def test_market_routes_execution_actions_through_its_execution_router(monkeypatch):
+    market = make_market()
+    routed_actions = []
+    original_route = market.execution_router.route
+
+    def record_route(action, **kwargs):
+        routed_actions.append((action, kwargs))
+        return original_route(action, **kwargs)
+
+    monkeypatch.setattr(market.execution_router, "route", record_route)
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    market.latest_option_premiums["CE"] = 30.0
+    set_strategy_position(market, None, None)
+    market._execute_strategy_result(
+        result(SignalAction.EXIT_CE),
+        TIME + timedelta(minutes=1),
+    )
+
+    assert [action for action, _ in routed_actions] == [
+        SignalAction.BUY_CE,
+        SignalAction.EXIT_CE,
+    ]
+    assert routed_actions[0][1]["contract_symbol"] == "NIFTY2681925000CE"
+    assert routed_actions[0][1]["quantity"] == 75
+    assert routed_actions[1][1]["contract_symbol"] == "NIFTY2681925000CE"
+    assert routed_actions[1][1]["quantity"] == 75
 
 
 def test_hold_causes_zero_paper_executions():

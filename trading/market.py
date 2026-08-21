@@ -15,6 +15,8 @@ from trading.ohlc import (
 from trading.indicator_engine import IndicatorEngine
 from trading.historical import historical_row_to_candle
 from trading.candle import Candle
+from trading.execution_mode import ExecutionMode
+from trading.execution_router import ExecutionRouter
 from trading.strategy import (
     IndicatorSnapshot,
     StrategyEngine,
@@ -23,6 +25,7 @@ from trading.paper_execution import PaperExecutionEngine
 from trading.paper_ledger import PaperTradeLedger
 from trading.paper_pnl import calculate_trade_pnl
 from trading.paper_session import calculate_session_summary
+from trading.paper_position import PaperPosition
 from trading.paper_trade import PaperTrade
 from trading.strategy import SignalAction
 
@@ -53,6 +56,9 @@ class MarketData:
         self.strategy_engine = StrategyEngine(target_points=2.0)
         self.latest_strategy_result = None
         self.paper_execution_engine = PaperExecutionEngine()
+        self.execution_router = ExecutionRouter(
+            paper_execution_engine=self.paper_execution_engine
+        )
         self.paper_trade_ledger = PaperTradeLedger()
 
         # Processed completed candle identities
@@ -154,12 +160,12 @@ class MarketData:
         return timestamp.astimezone(EXCHANGE_TIMEZONE)
 
     def _execute_strategy_result(self, strategy_result, execution_time):
-        """Routes ordered strategy actions into the paper execution engine."""
+        """Routes ordered strategy actions through the execution router."""
         if strategy_result is None or strategy_result.action is SignalAction.HOLD:
             return ()
 
         execution_time = self._normalize_execution_time(execution_time)
-        positions = []
+        execution_results = []
 
         for action in strategy_result.actions:
             if action is SignalAction.HOLD:
@@ -176,26 +182,43 @@ class MarketData:
                     raise ValueError("NIFTY option pair has not been selected.")
 
                 contract = self.nifty_option_pair[side]
-                position = self.paper_execution_engine.execute(
-                    action,
-                    contract_symbol=contract["tradingsymbol"],
-                    premium=premium,
-                    quantity=contract["lot_size"],
-                    execution_time=execution_time,
-                )
+                contract_symbol = contract["tradingsymbol"]
+                quantity = contract["lot_size"]
             elif action in (SignalAction.EXIT_CE, SignalAction.EXIT_PE):
-                position = self.paper_execution_engine.execute(
-                    action,
-                    premium=premium,
-                    execution_time=execution_time,
+                active_position = self.paper_execution_engine.active_position
+                contract_symbol = (
+                    active_position.contract_symbol
+                    if active_position is not None
+                    else None
                 )
+                quantity = (
+                    active_position.quantity
+                    if active_position is not None
+                    else None
+                )
+            else:
+                raise ValueError("Unsupported strategy action for paper execution.")
+
+            execution_result = self.execution_router.route(
+                action,
+                contract_symbol=contract_symbol,
+                side=side,
+                quantity=quantity,
+                reference_price=premium,
+                created_time=execution_time,
+            )
+
+            if (
+                action in (SignalAction.EXIT_CE, SignalAction.EXIT_PE)
+                and isinstance(execution_result, PaperPosition)
+            ):
                 trade = self.paper_trade_ledger.record(
                     PaperTrade(
-                        contract_symbol=position.contract_symbol,
-                        side=position.side,
-                        quantity=position.quantity,
-                        entry_price=position.entry_price,
-                        entry_time=position.entry_time,
+                        contract_symbol=execution_result.contract_symbol,
+                        side=execution_result.side,
+                        quantity=execution_result.quantity,
+                        entry_price=execution_result.entry_price,
+                        entry_time=execution_result.entry_time,
                         exit_price=premium,
                         exit_time=execution_time,
                         exit_action=action,
@@ -205,7 +228,7 @@ class MarketData:
                 )
                 pnl = calculate_trade_pnl(trade)
                 print(
-                    f"PAPER REALIZED P&L: {position.contract_symbol} "
+                    f"PAPER REALIZED P&L: {execution_result.contract_symbol} "
                     f"Points {pnl.points_pnl:+.2f}, "
                     f"Gross Rs {pnl.gross_pnl:+.2f}"
                 )
@@ -221,17 +244,23 @@ class MarketData:
                     f"Points {summary.total_points_pnl:+.2f}, "
                     f"Gross Rs {summary.total_gross_pnl:+.2f}"
                 )
-            else:
-                raise ValueError("Unsupported strategy action for paper execution.")
 
-            positions.append(position)
+            execution_results.append(execution_result)
+            execution_label = (
+                "PAPER"
+                if isinstance(execution_result, PaperPosition)
+                else "LIVE INTENT"
+            )
             print(
-                f"PAPER {action.value}: {position.contract_symbol} "
+                f"{execution_label} {action.value}: "
+                f"{execution_result.contract_symbol} "
                 f"@ Rs {premium:.2f}"
             )
 
-        self._validate_paper_state_consistency()
-        return tuple(positions)
+        if self.execution_router.mode is ExecutionMode.PAPER:
+            self._validate_paper_state_consistency()
+
+        return tuple(execution_results)
 
     def _validate_paper_state_consistency(self):
         """Ensures strategy and paper active-position state agree."""
