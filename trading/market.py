@@ -21,8 +21,13 @@ from trading.execution_router import ExecutionRouter
 from trading.live_execution import LiveExecutionCoordinator
 from trading.live_order import LiveOrderIntent
 from trading.broker_order_status import BrokerOrderState
+from trading.broker_position_reconciler import (
+    BrokerPositionReconciler,
+    PositionReconciliationState,
+)
 from trading.pending_live_order import PendingLiveOrder
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
+from trading.zerodha_position_reader import ZerodhaPositionReader
 from trading.strategy import (
     IndicatorSnapshot,
     StrategyEngine,
@@ -49,6 +54,10 @@ class PendingLiveOrderError(RuntimeError):
     """Raised when a LIVE action would conflict with an unresolved order."""
 
 
+class LivePositionReconciliationError(RuntimeError):
+    """Raised when broker net exposure cannot safely permit a LIVE action."""
+
+
 class MarketData:
     """
     Handles downloading historical
@@ -62,6 +71,8 @@ class MarketData:
         execution_mode=ExecutionMode.PAPER,
         live_execution_coordinator=None,
         live_order_status_reader=None,
+        live_position_reader=None,
+        live_position_reconciler=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -89,6 +100,22 @@ class MarketData:
                 "LIVE execution requires a ZerodhaOrderStatusReader."
             )
 
+        if (
+            execution_mode is ExecutionMode.LIVE
+            and not isinstance(live_position_reader, ZerodhaPositionReader)
+        ):
+            raise TypeError(
+                "LIVE execution requires a ZerodhaPositionReader."
+            )
+
+        if (
+            execution_mode is ExecutionMode.LIVE
+            and not isinstance(live_position_reconciler, BrokerPositionReconciler)
+        ):
+            raise TypeError(
+                "LIVE execution requires a BrokerPositionReconciler."
+            )
+
         self.kite = kite
 
         self.instruments = instruments
@@ -109,8 +136,11 @@ class MarketData:
         )
         self.live_execution_coordinator = live_execution_coordinator
         self.live_order_status_reader = live_order_status_reader
+        self.live_position_reader = live_position_reader
+        self.live_position_reconciler = live_position_reconciler
         self.live_execution_context = None
         self.pending_live_order = None
+        self.latest_live_position_reconciliation = None
         self.paper_trade_ledger = PaperTradeLedger()
 
         # Processed completed candle identities
@@ -230,6 +260,9 @@ class MarketData:
                 raise PendingLiveOrderError(
                     "A pending LIVE order must be reconciled before execution."
                 )
+
+            if self.execution_router.mode is ExecutionMode.LIVE:
+                self._validate_live_broker_position_before_action()
 
             side = "CE" if action in (
                 SignalAction.BUY_CE,
@@ -369,6 +402,37 @@ class MarketData:
             self._validate_paper_state_consistency()
 
         return tuple(execution_results)
+
+    def _validate_live_broker_position_before_action(self):
+        """Fails closed unless broker net positions match confirmed LIVE state."""
+        allowed_symbols = set()
+        if self.nifty_option_pair is not None:
+            allowed_symbols.update(
+                contract["tradingsymbol"]
+                for contract in self.nifty_option_pair.values()
+                if isinstance(contract, dict) and "tradingsymbol" in contract
+            )
+        if self.live_execution_context is not None:
+            allowed_symbols.add(self.live_execution_context.contract_symbol)
+
+        broker_positions = self.live_position_reader.read()
+        reconciliation = self.live_position_reconciler.reconcile(
+            self.live_execution_context,
+            broker_positions,
+            allowed_contract_symbols=tuple(allowed_symbols),
+        )
+        self.latest_live_position_reconciliation = reconciliation
+
+        expected_state = (
+            PositionReconciliationState.MATCH
+            if self.live_execution_context is not None
+            else PositionReconciliationState.NO_POSITION
+        )
+        if reconciliation.state is not expected_state:
+            raise LivePositionReconciliationError(
+                f"LIVE broker position reconciliation is "
+                f"{reconciliation.state.value}: {reconciliation.message}"
+            )
 
     def reconcile_pending_live_order(self):
         """Reads one pending LIVE order status without submitting an order."""

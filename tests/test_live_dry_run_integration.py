@@ -10,12 +10,17 @@ from trading.live_execution import (
     LiveExecutionCoordinator,
     LiveExecutionDisabledError,
 )
-from trading.market import MarketData
-from trading.market import PendingLiveOrderError
+from trading.broker_position_reconciler import BrokerPositionReconciler
+from trading.market import (
+    LivePositionReconciliationError,
+    MarketData,
+    PendingLiveOrderError,
+)
 from trading.strategy import IndicatorSnapshot, SignalAction, StrategyResult
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
 from trading.zerodha_order_submitter import ZerodhaOrderSubmitter
+from trading.zerodha_position_reader import ZerodhaPositionReader
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -23,13 +28,24 @@ TIME = datetime(2026, 8, 21, 9, 15, tzinfo=IST)
 
 
 class FakeKiteClient:
-    def __init__(self, exception=None, status_exception=None, status_records=None):
+    def __init__(
+        self,
+        exception=None,
+        status_exception=None,
+        status_records=None,
+        position_exception=None,
+        position_responses=None,
+    ):
         self.exception = exception
         self.status_exception = status_exception
         self.status_records = list(status_records or [])
+        self.position_exception = position_exception
+        self.position_responses = list(position_responses or [])
         self.calls = []
         self.order_history_calls = []
+        self.position_calls = []
         self.history_by_order_id = {}
+        self.net_positions = []
 
     def place_order(self, **kwargs):
         self.calls.append(kwargs)
@@ -48,6 +64,23 @@ class FakeKiteClient:
         )
         record = {**record, "order_id": order_id}
         self.history_by_order_id[order_id] = [record]
+        if (
+            record["status"] == "COMPLETE"
+            and record["filled_quantity"] == kwargs["quantity"]
+            and record["pending_quantity"] == 0
+        ):
+            if kwargs["transaction_type"] == "BUY":
+                self.net_positions = [
+                    {
+                        "tradingsymbol": kwargs["tradingsymbol"],
+                        "exchange": kwargs["exchange"],
+                        "quantity": kwargs["quantity"],
+                        "average_price": record["average_price"],
+                        "product": kwargs["product"],
+                    }
+                ]
+            else:
+                self.net_positions = []
         return order_id
 
     def order_history(self, order_id):
@@ -55,6 +88,14 @@ class FakeKiteClient:
         if self.status_exception is not None:
             raise self.status_exception
         return self.history_by_order_id[order_id]
+
+    def positions(self):
+        self.position_calls.append(True)
+        if self.position_exception is not None:
+            raise self.position_exception
+        if self.position_responses:
+            return {"net": self.position_responses.pop(0), "day": []}
+        return {"net": list(self.net_positions), "day": []}
 
 
 def make_market(enabled=True, client=None, status_records=None, status_exception=None):
@@ -68,12 +109,15 @@ def make_market(enabled=True, client=None, status_records=None, status_exception
         enabled=enabled,
     )
     status_reader = ZerodhaOrderStatusReader(client)
+    position_reader = ZerodhaPositionReader(client)
     market = MarketData(
         kite=None,
         instruments=None,
         execution_mode=ExecutionMode.LIVE,
         live_execution_coordinator=coordinator,
         live_order_status_reader=status_reader,
+        live_position_reader=position_reader,
+        live_position_reconciler=BrokerPositionReconciler(),
     )
     market.nifty_option_pair = {
         "CE": {"tradingsymbol": "NIFTY2682125000CE", "lot_size": 75},
@@ -99,6 +143,16 @@ def set_strategy_position(market, side, premium):
 
 def replace_status(client, order_id, record):
     client.history_by_order_id[order_id] = [{**record, "order_id": order_id}]
+
+
+def broker_position(symbol="NIFTY2682125000CE", quantity=75, product="MIS"):
+    return {
+        "tradingsymbol": symbol,
+        "exchange": "NFO",
+        "quantity": quantity,
+        "average_price": 27.0,
+        "product": product,
+    }
 
 
 def test_market_data_defaults_to_paper_mode():
@@ -920,3 +974,161 @@ def test_reconcile_without_pending_order_is_a_clear_state_error():
 
     assert client.calls == []
     assert client.order_history_calls == []
+
+
+def test_live_market_requires_position_reader_and_reconciler():
+    client = FakeKiteClient()
+    coordinator = LiveExecutionCoordinator(
+        ZerodhaOrderAdapter(), ZerodhaOrderSubmitter(client), enabled=True
+    )
+    status_reader = ZerodhaOrderStatusReader(client)
+
+    with pytest.raises(TypeError, match="ZerodhaPositionReader"):
+        MarketData(
+            None,
+            None,
+            execution_mode=ExecutionMode.LIVE,
+            live_execution_coordinator=coordinator,
+            live_order_status_reader=status_reader,
+        )
+
+    with pytest.raises(TypeError, match="BrokerPositionReconciler"):
+        MarketData(
+            None,
+            None,
+            execution_mode=ExecutionMode.LIVE,
+            live_execution_coordinator=coordinator,
+            live_order_status_reader=status_reader,
+            live_position_reader=ZerodhaPositionReader(client),
+        )
+
+
+@pytest.mark.parametrize(
+    "positions",
+    [
+        [broker_position()],
+        [broker_position(symbol="NIFTY2682125000PE", quantity=50)],
+        [broker_position(quantity=-75)],
+        [broker_position(), broker_position(symbol="NIFTY2682125000PE", quantity=50)],
+    ],
+)
+def test_unexpected_broker_exposure_blocks_live_buy_before_order_work(positions):
+    market, client = make_market()
+    client.net_positions = positions
+    set_strategy_position(market, "CE", 27.0)
+
+    with pytest.raises(LivePositionReconciliationError):
+        market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+
+    assert len(client.position_calls) == 1
+    assert client.calls == []
+    assert client.order_history_calls == []
+    assert market.live_execution_context is None
+    assert market.pending_live_order is None
+
+
+@pytest.mark.parametrize(
+    "positions",
+    [
+        [],
+        [broker_position(symbol="NIFTY2682125100CE")],
+        [broker_position(quantity=50)],
+        [broker_position(quantity=-75)],
+        [broker_position(product="NRML")],
+        [broker_position(), broker_position(symbol="NIFTY2682125000PE", quantity=50)],
+    ],
+)
+def test_broker_position_mismatch_blocks_live_exit_before_order_work(positions):
+    market, client = make_market()
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    context = market.live_execution_context
+    client.net_positions = positions
+    calls_before = len(client.calls)
+    reads_before = len(client.order_history_calls)
+    position_reads_before = len(client.position_calls)
+    set_strategy_position(market, None, None)
+
+    with pytest.raises(LivePositionReconciliationError):
+        market._execute_strategy_result(result(SignalAction.EXIT_CE), TIME)
+
+    assert len(client.position_calls) == position_reads_before + 1
+    assert len(client.calls) == calls_before
+    assert len(client.order_history_calls) == reads_before
+    assert market.live_execution_context is context
+    assert market.pending_live_order is None
+
+
+def test_pending_order_guard_precedes_live_position_read():
+    market, client = make_market(
+        status_records=[
+            {"status": "OPEN", "filled_quantity": 0, "pending_quantity": 75, "average_price": 0.0}
+        ]
+    )
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    position_reads_before = len(client.position_calls)
+    calls_before = len(client.calls)
+    history_before = len(client.order_history_calls)
+
+    with pytest.raises(PendingLiveOrderError):
+        market._execute_strategy_result(result(SignalAction.BUY_PE), TIME)
+
+    assert len(client.position_calls) == position_reads_before
+    assert len(client.calls) == calls_before
+    assert len(client.order_history_calls) == history_before
+
+
+def test_reversal_rechecks_broker_positions_after_filled_exit():
+    market, client = make_market()
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    client.position_responses = [
+        [broker_position()],
+        [broker_position()],
+    ]
+    set_strategy_position(market, "PE", 31.0)
+
+    with pytest.raises(LivePositionReconciliationError):
+        market._execute_strategy_result(
+            result(SignalAction.EXIT_CE, (SignalAction.EXIT_CE, SignalAction.BUY_PE)),
+            TIME + timedelta(minutes=1),
+        )
+
+    assert [call["transaction_type"] for call in client.calls] == ["BUY", "SELL"]
+    assert len(client.position_calls) == 3
+    assert market.live_execution_context is None
+
+
+def test_target_exit_mismatch_blocks_sell_and_preserves_context():
+    market, client = make_market()
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    context = market.live_execution_context
+    client.net_positions = []
+    market.latest_completed_snapshot = IndicatorSnapshot(
+        candle=Candle(TIME, 100, 100, 100, 100), values={"ema": {}}
+    )
+    market.latest_option_premiums["CE"] = 29.0
+
+    with pytest.raises(LivePositionReconciliationError):
+        market._monitor_live_option_target(TIME + timedelta(minutes=1))
+
+    assert [call["transaction_type"] for call in client.calls] == ["BUY"]
+    assert market.live_execution_context is context
+    assert market.pending_live_order is None
+
+
+def test_live_position_read_failure_propagates_before_submission_without_retry():
+    client = FakeKiteClient(position_exception=RuntimeError("positions unavailable"))
+    market, client = make_market(client=client)
+    set_strategy_position(market, "CE", 27.0)
+
+    with pytest.raises(RuntimeError, match="positions unavailable"):
+        market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+
+    assert len(client.position_calls) == 1
+    assert client.calls == []
+    assert client.order_history_calls == []
+    assert market.live_execution_context is None
+    assert market.pending_live_order is None
