@@ -20,6 +20,8 @@ from trading.execution_mode import ExecutionMode
 from trading.execution_router import ExecutionRouter
 from trading.live_execution import LiveExecutionCoordinator
 from trading.live_order import LiveOrderIntent
+from trading.broker_order_status import BrokerOrderState
+from trading.pending_live_order import PendingLiveOrder
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
 from trading.strategy import (
     IndicatorSnapshot,
@@ -41,6 +43,10 @@ class LiveExecutionContext:
     side: str
     contract_symbol: str
     quantity: int
+
+
+class PendingLiveOrderError(RuntimeError):
+    """Raised when a LIVE action would conflict with an unresolved order."""
 
 
 class MarketData:
@@ -104,6 +110,7 @@ class MarketData:
         self.live_execution_coordinator = live_execution_coordinator
         self.live_order_status_reader = live_order_status_reader
         self.live_execution_context = None
+        self.pending_live_order = None
         self.paper_trade_ledger = PaperTradeLedger()
 
         # Processed completed candle identities
@@ -216,6 +223,14 @@ class MarketData:
             if action is SignalAction.HOLD:
                 continue
 
+            if (
+                self.execution_router.mode is ExecutionMode.LIVE
+                and self.pending_live_order is not None
+            ):
+                raise PendingLiveOrderError(
+                    "A pending LIVE order must be reconciled before execution."
+                )
+
             side = "CE" if action in (
                 SignalAction.BUY_CE,
                 SignalAction.EXIT_CE,
@@ -277,18 +292,11 @@ class MarketData:
                     execution_result
                 )
                 broker_status = self.live_order_status_reader.read(order_id)
-
-                if (
-                    broker_status.is_filled
-                    and action in (SignalAction.BUY_CE, SignalAction.BUY_PE)
-                ):
-                    self.live_execution_context = LiveExecutionContext(
-                        side=execution_result.side,
-                        contract_symbol=execution_result.contract_symbol,
-                        quantity=execution_result.quantity,
-                    )
-                elif broker_status.is_filled:
-                    self.live_execution_context = None
+                is_pending = self._apply_live_order_status(
+                    order_id,
+                    execution_result,
+                    broker_status,
+                )
 
                 execution_results.append(order_id)
                 print(
@@ -298,8 +306,11 @@ class MarketData:
                 )
 
                 if (
-                    action in (SignalAction.EXIT_CE, SignalAction.EXIT_PE)
-                    and not broker_status.is_filled
+                    is_pending
+                    or not self._is_confirmed_full_fill(
+                        execution_result,
+                        broker_status,
+                    )
                 ):
                     break
 
@@ -358,6 +369,77 @@ class MarketData:
             self._validate_paper_state_consistency()
 
         return tuple(execution_results)
+
+    def reconcile_pending_live_order(self):
+        """Reads one pending LIVE order status without submitting an order."""
+        pending_order = self.pending_live_order
+        if pending_order is None:
+            raise ValueError("No pending LIVE order exists to reconcile.")
+
+        broker_status = self.live_order_status_reader.read(pending_order.order_id)
+        self._apply_live_order_status(
+            pending_order.order_id,
+            pending_order,
+            broker_status,
+        )
+        return broker_status
+
+    def _apply_live_order_status(self, order_id, order, broker_status):
+        """Applies normalized status only to confirmed or pending continuity."""
+        if self._is_confirmed_full_fill(order, broker_status):
+            if order.action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
+                self.live_execution_context = LiveExecutionContext(
+                    side=order.side,
+                    contract_symbol=order.contract_symbol,
+                    quantity=order.quantity,
+                )
+            else:
+                self.live_execution_context = None
+            self.pending_live_order = None
+            return False
+
+        if self._status_requires_pending_tracking(broker_status):
+            self.pending_live_order = PendingLiveOrder(
+                order_id=order_id,
+                action=order.action,
+                side=order.side,
+                contract_symbol=order.contract_symbol,
+                quantity=order.quantity,
+                created_time=order.created_time,
+            )
+            return True
+
+        self.pending_live_order = None
+        return False
+
+    @staticmethod
+    def _is_confirmed_full_fill(order, broker_status):
+        """Returns whether status confirms the entire submitted quantity filled."""
+        return (
+            broker_status.is_filled
+            and broker_status.filled_quantity == order.quantity
+        )
+
+    @staticmethod
+    def _status_requires_pending_tracking(broker_status):
+        """Returns whether a non-filled status leaves possible broker exposure."""
+        if broker_status.state in (
+            BrokerOrderState.OPEN,
+            BrokerOrderState.SUBMITTED,
+            BrokerOrderState.UNKNOWN,
+        ):
+            return True
+
+        if broker_status.state is BrokerOrderState.CANCELLED:
+            return broker_status.filled_quantity > 0
+
+        if broker_status.state is BrokerOrderState.COMPLETE:
+            return (
+                broker_status.filled_quantity > 0
+                or broker_status.pending_quantity > 0
+            )
+
+        return False
 
     def _validate_paper_state_consistency(self):
         """Ensures strategy and paper active-position state agree."""
