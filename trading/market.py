@@ -20,6 +20,7 @@ from trading.execution_mode import ExecutionMode
 from trading.execution_router import ExecutionRouter
 from trading.live_execution import LiveExecutionCoordinator
 from trading.live_order import LiveOrderIntent
+from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
 from trading.strategy import (
     IndicatorSnapshot,
     StrategyEngine,
@@ -35,7 +36,7 @@ from trading.strategy import SignalAction
 
 @dataclass(frozen=True)
 class LiveExecutionContext:
-    """Successful-submission continuity only; it is not broker fill state."""
+    """Broker-confirmed full-fill continuity only; it is not broker fill state."""
 
     side: str
     contract_symbol: str
@@ -54,6 +55,7 @@ class MarketData:
         instruments,
         execution_mode=ExecutionMode.PAPER,
         live_execution_coordinator=None,
+        live_order_status_reader=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -68,6 +70,17 @@ class MarketData:
         ):
             raise TypeError(
                 "LIVE execution requires a LiveExecutionCoordinator."
+            )
+
+        if (
+            execution_mode is ExecutionMode.LIVE
+            and not isinstance(
+                live_order_status_reader,
+                ZerodhaOrderStatusReader,
+            )
+        ):
+            raise TypeError(
+                "LIVE execution requires a ZerodhaOrderStatusReader."
             )
 
         self.kite = kite
@@ -89,6 +102,7 @@ class MarketData:
             paper_execution_engine=self.paper_execution_engine
         )
         self.live_execution_coordinator = live_execution_coordinator
+        self.live_order_status_reader = live_order_status_reader
         self.live_execution_context = None
         self.paper_trade_ledger = PaperTradeLedger()
 
@@ -247,7 +261,7 @@ class MarketData:
                         else None
                     )
             else:
-                raise ValueError("Unsupported strategy action for paper execution.")
+                raise ValueError("Unsupported strategy action for execution.")
 
             execution_result = self.execution_router.route(
                 action,
@@ -262,14 +276,18 @@ class MarketData:
                 order_id = self.live_execution_coordinator.execute(
                     execution_result
                 )
+                broker_status = self.live_order_status_reader.read(order_id)
 
-                if action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
+                if (
+                    broker_status.is_filled
+                    and action in (SignalAction.BUY_CE, SignalAction.BUY_PE)
+                ):
                     self.live_execution_context = LiveExecutionContext(
                         side=execution_result.side,
                         contract_symbol=execution_result.contract_symbol,
                         quantity=execution_result.quantity,
                     )
-                else:
+                elif broker_status.is_filled:
                     self.live_execution_context = None
 
                 execution_results.append(order_id)
@@ -278,6 +296,13 @@ class MarketData:
                     f"{execution_result.contract_symbol} "
                     f"@ Rs {premium:.2f} ID {order_id}"
                 )
+
+                if (
+                    action in (SignalAction.EXIT_CE, SignalAction.EXIT_PE)
+                    and not broker_status.is_filled
+                ):
+                    break
+
                 continue
 
             if (
