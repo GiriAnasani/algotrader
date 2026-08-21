@@ -50,7 +50,7 @@ class MarketData:
         self.indicator_engine = IndicatorEngine()
 
         # Strategy
-        self.strategy_engine = StrategyEngine()
+        self.strategy_engine = StrategyEngine(target_points=2.0)
         self.latest_strategy_result = None
         self.paper_execution_engine = PaperExecutionEngine()
         self.paper_trade_ledger = PaperTradeLedger()
