@@ -1,4 +1,5 @@
 import pandas as pd
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic
 
@@ -17,6 +18,8 @@ from trading.historical import historical_row_to_candle
 from trading.candle import Candle
 from trading.execution_mode import ExecutionMode
 from trading.execution_router import ExecutionRouter
+from trading.live_execution import LiveExecutionCoordinator
+from trading.live_order import LiveOrderIntent
 from trading.strategy import (
     IndicatorSnapshot,
     StrategyEngine,
@@ -30,6 +33,15 @@ from trading.paper_trade import PaperTrade
 from trading.strategy import SignalAction
 
 
+@dataclass(frozen=True)
+class LiveExecutionContext:
+    """Successful-submission continuity only; it is not broker fill state."""
+
+    side: str
+    contract_symbol: str
+    quantity: int
+
+
 class MarketData:
     """
     Handles downloading historical
@@ -39,8 +51,24 @@ class MarketData:
     def __init__(
         self,
         kite,
-        instruments
+        instruments,
+        execution_mode=ExecutionMode.PAPER,
+        live_execution_coordinator=None,
     ):
+
+        if not isinstance(execution_mode, ExecutionMode):
+            raise TypeError("Execution mode must be an ExecutionMode.")
+
+        if (
+            execution_mode is ExecutionMode.LIVE
+            and not isinstance(
+                live_execution_coordinator,
+                LiveExecutionCoordinator,
+            )
+        ):
+            raise TypeError(
+                "LIVE execution requires a LiveExecutionCoordinator."
+            )
 
         self.kite = kite
 
@@ -57,8 +85,11 @@ class MarketData:
         self.latest_strategy_result = None
         self.paper_execution_engine = PaperExecutionEngine()
         self.execution_router = ExecutionRouter(
+            mode=execution_mode,
             paper_execution_engine=self.paper_execution_engine
         )
+        self.live_execution_coordinator = live_execution_coordinator
+        self.live_execution_context = None
         self.paper_trade_ledger = PaperTradeLedger()
 
         # Processed completed candle identities
@@ -178,6 +209,12 @@ class MarketData:
             premium = self.latest_option_premiums.get(side)
 
             if action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
+                if (
+                    self.execution_router.mode is ExecutionMode.LIVE
+                    and self.live_execution_context is not None
+                ):
+                    raise ValueError("A live execution context is already active.")
+
                 if self.nifty_option_pair is None:
                     raise ValueError("NIFTY option pair has not been selected.")
 
@@ -185,17 +222,30 @@ class MarketData:
                 contract_symbol = contract["tradingsymbol"]
                 quantity = contract["lot_size"]
             elif action in (SignalAction.EXIT_CE, SignalAction.EXIT_PE):
-                active_position = self.paper_execution_engine.active_position
-                contract_symbol = (
-                    active_position.contract_symbol
-                    if active_position is not None
-                    else None
-                )
-                quantity = (
-                    active_position.quantity
-                    if active_position is not None
-                    else None
-                )
+                if self.execution_router.mode is ExecutionMode.LIVE:
+                    active_context = self.live_execution_context
+                    if active_context is None:
+                        raise ValueError("No live execution context is active.")
+
+                    if active_context.side != side:
+                        raise ValueError(
+                            "Exit action does not match the live execution context side."
+                        )
+
+                    contract_symbol = active_context.contract_symbol
+                    quantity = active_context.quantity
+                else:
+                    active_position = self.paper_execution_engine.active_position
+                    contract_symbol = (
+                        active_position.contract_symbol
+                        if active_position is not None
+                        else None
+                    )
+                    quantity = (
+                        active_position.quantity
+                        if active_position is not None
+                        else None
+                    )
             else:
                 raise ValueError("Unsupported strategy action for paper execution.")
 
@@ -207,6 +257,28 @@ class MarketData:
                 reference_price=premium,
                 created_time=execution_time,
             )
+
+            if isinstance(execution_result, LiveOrderIntent):
+                order_id = self.live_execution_coordinator.execute(
+                    execution_result
+                )
+
+                if action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
+                    self.live_execution_context = LiveExecutionContext(
+                        side=execution_result.side,
+                        contract_symbol=execution_result.contract_symbol,
+                        quantity=execution_result.quantity,
+                    )
+                else:
+                    self.live_execution_context = None
+
+                execution_results.append(order_id)
+                print(
+                    f"LIVE ORDER {action.value}: "
+                    f"{execution_result.contract_symbol} "
+                    f"@ Rs {premium:.2f} ID {order_id}"
+                )
+                continue
 
             if (
                 action in (SignalAction.EXIT_CE, SignalAction.EXIT_PE)
