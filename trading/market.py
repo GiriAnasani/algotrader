@@ -340,15 +340,27 @@ class MarketData:
             )
 
             if isinstance(execution_result, LiveOrderIntent):
-                order_id = self.live_execution_coordinator.execute(
-                    execution_result
-                )
-                broker_status = self.live_order_status_reader.read(order_id)
+                try:
+                    order_id = self.live_execution_coordinator.execute(
+                        execution_result
+                    )
+                except Exception:
+                    self.live_readiness_gate.revoke()
+                    raise
+
+                try:
+                    broker_status = self.live_order_status_reader.read(order_id)
+                except Exception:
+                    self.live_readiness_gate.revoke()
+                    raise
+
                 is_pending = self._apply_live_order_status(
                     order_id,
                     execution_result,
                     broker_status,
                 )
+                if is_pending:
+                    self.live_readiness_gate.revoke()
 
                 execution_results.append(order_id)
                 print(
@@ -434,7 +446,12 @@ class MarketData:
         if self.live_execution_context is not None:
             allowed_symbols.add(self.live_execution_context.contract_symbol)
 
-        broker_positions = self.live_position_reader.read()
+        try:
+            broker_positions = self.live_position_reader.read()
+        except Exception:
+            self.live_readiness_gate.revoke()
+            raise
+
         reconciliation = self.live_position_reconciler.reconcile(
             self.live_execution_context,
             broker_positions,
@@ -448,6 +465,7 @@ class MarketData:
             else PositionReconciliationState.NO_POSITION
         )
         if reconciliation.state is not expected_state:
+            self.live_readiness_gate.revoke()
             raise LivePositionReconciliationError(
                 f"LIVE broker position reconciliation is "
                 f"{reconciliation.state.value}: {reconciliation.message}"
@@ -459,7 +477,11 @@ class MarketData:
         if pending_order is None:
             raise ValueError("No pending LIVE order exists to reconcile.")
 
-        broker_status = self.live_order_status_reader.read(pending_order.order_id)
+        self.live_readiness_gate.revoke()
+        broker_status = self.live_order_status_reader.read(
+            pending_order.order_id
+        )
+
         self._apply_live_order_status(
             pending_order.order_id,
             pending_order,

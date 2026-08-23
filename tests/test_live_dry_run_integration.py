@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import inspect
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -314,6 +315,7 @@ def test_live_buy_reaches_fake_broker_once(action, side, expected_quantity):
     assert client.calls[0]["validity"] == "DAY"
     assert client.order_history_calls == ["fake-order-1"]
     assert market.paper_trade_ledger.count == 0
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
 
 @pytest.mark.parametrize(
@@ -347,6 +349,7 @@ def test_live_exit_uses_original_live_contract_context(
     assert market.live_execution_context is None
     assert market.paper_trade_ledger.count == 0
     assert client.order_history_calls == ["fake-order-1", "fake-order-2"]
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
 
 @pytest.mark.parametrize(
@@ -388,6 +391,7 @@ def test_live_reversal_submits_exit_then_buy(
     ]
     assert market.live_execution_context.side == next_side
     assert market.paper_trade_ledger.count == 0
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
 
 def test_live_target_exit_submits_only_sell_without_paper_accounting():
@@ -408,6 +412,7 @@ def test_live_target_exit_submits_only_sell_without_paper_accounting():
     assert [call["transaction_type"] for call in client.calls] == ["BUY", "SELL"]
     assert market.paper_trade_ledger.count == 0
     assert market.live_execution_context is None
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
 
 def test_live_non_filled_target_exit_retains_context():
@@ -430,6 +435,7 @@ def test_live_non_filled_target_exit_retains_context():
     assert market.live_execution_context is active_context
     assert market.pending_live_order.action is SignalAction.EXIT_CE
     assert market.paper_trade_ledger.count == 0
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_disabled_coordinator_fails_closed_without_broker_call():
@@ -465,7 +471,7 @@ def test_live_non_filled_buy_does_not_create_context(status_record):
     )
     assert client.order_history_calls == ["fake-order-1"]
     assert market.live_execution_context is None
-    assert (market.pending_live_order is not None) is (
+    is_pending = (
         status_record["status"] not in ("REJECTED",)
         and not (
             status_record["status"] == "CANCELLED"
@@ -477,6 +483,8 @@ def test_live_non_filled_buy_does_not_create_context(status_record):
             and status_record["pending_quantity"] == 0
         )
     )
+    assert (market.pending_live_order is not None) is is_pending
+    assert market.live_readiness_gate.is_ready is (not is_pending)
     assert market.paper_trade_ledger.count == 0
 
 
@@ -506,7 +514,7 @@ def test_live_non_filled_exit_retains_context(exit_status):
     ) == ("fake-order-2",)
     assert client.order_history_calls == ["fake-order-1", "fake-order-2"]
     assert market.live_execution_context is active_context
-    assert (market.pending_live_order is not None) is (
+    is_pending = (
         exit_status["status"] not in ("REJECTED",)
         and not (
             exit_status["status"] == "CANCELLED"
@@ -518,6 +526,8 @@ def test_live_non_filled_exit_retains_context(exit_status):
             and exit_status["pending_quantity"] == 0
         )
     )
+    assert (market.pending_live_order is not None) is is_pending
+    assert market.live_readiness_gate.is_ready is (not is_pending)
 
 
 @pytest.mark.parametrize(
@@ -588,6 +598,7 @@ def test_live_hold_warmup_and_duplicate_candle_submit_nothing():
     assert market._process_completed_candle(candle)["processed"] is False
     assert client.calls == []
     assert client.order_history_calls == []
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
 
 def test_live_broker_failure_propagates_without_retry():
@@ -601,6 +612,8 @@ def test_live_broker_failure_propagates_without_retry():
     assert len(client.calls) == 1
     assert client.order_history_calls == []
     assert market.live_execution_context is None
+    assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_failed_exit_preserves_existing_submission_context():
@@ -619,6 +632,8 @@ def test_live_failed_exit_preserves_existing_submission_context():
 
     assert len(client.calls) == 2
     assert market.live_execution_context is active_context
+    assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_status_read_failure_preserves_context_without_retry():
@@ -637,6 +652,8 @@ def test_live_status_read_failure_preserves_context_without_retry():
 
     assert client.order_history_calls == ["fake-order-1", "fake-order-2"]
     assert market.live_execution_context is active_context
+    assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_buy_status_read_failure_leaves_context_none_without_retry():
@@ -660,6 +677,8 @@ def test_live_buy_status_read_failure_leaves_context_none_without_retry():
     ]
     assert client.order_history_calls == ["fake-order-1"]
     assert market.live_execution_context is None
+    assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_non_filled_reversal_does_not_submit_opposite_buy():
@@ -866,6 +885,12 @@ def test_reconcile_pending_buy_complete_creates_context_without_submission():
         "fake-order-1",
         {"status": "COMPLETE", "filled_quantity": 75, "pending_quantity": 0, "average_price": 27.0},
     )
+    market.live_readiness_gate.apply_recovery_result(
+        LiveRecoveryResult(
+            LiveRecoveryState.SAFE_FLAT, (), (), "Artificial test restoration."
+        )
+    )
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
     status = market.reconcile_pending_live_order()
 
@@ -874,6 +899,7 @@ def test_reconcile_pending_buy_complete_creates_context_without_submission():
     assert client.order_history_calls == ["fake-order-1", "fake-order-1"]
     assert market.pending_live_order is None
     assert market.live_execution_context.side == "CE"
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_reconcile_pending_buy_partial_complete_keeps_pending_without_context():
@@ -896,6 +922,7 @@ def test_reconcile_pending_buy_partial_complete_keeps_pending_without_context():
     assert market.pending_live_order == pending
     assert market.live_execution_context is None
     assert len(client.calls) == 1
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_reconcile_pending_exit_complete_clears_context_without_reversal_buy():
@@ -915,12 +942,19 @@ def test_reconcile_pending_exit_complete_clears_context_without_reversal_buy():
         "fake-order-2",
         {"status": "COMPLETE", "filled_quantity": 75, "pending_quantity": 0, "average_price": 27.0},
     )
+    market.live_readiness_gate.apply_recovery_result(
+        LiveRecoveryResult(
+            LiveRecoveryState.SAFE_FLAT, (), (), "Artificial test restoration."
+        )
+    )
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
     market.reconcile_pending_live_order()
 
     assert [call["transaction_type"] for call in client.calls] == ["BUY", "SELL"]
     assert market.pending_live_order is None
     assert market.live_execution_context is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_reconcile_pending_exit_partial_complete_keeps_context_and_pending():
@@ -945,6 +979,7 @@ def test_reconcile_pending_exit_partial_complete_keeps_context_and_pending():
     assert market.pending_live_order == pending
     assert market.live_execution_context is active_context
     assert len(client.calls) == 2
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 @pytest.mark.parametrize(
@@ -974,6 +1009,7 @@ def test_reconcile_unresolved_status_retains_pending_and_context(status_record):
     assert len(client.calls) == 2
     assert market.pending_live_order == pending
     assert market.live_execution_context is active_context
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 @pytest.mark.parametrize(
@@ -994,11 +1030,18 @@ def test_reconcile_definitive_no_fill_clears_pending_but_retains_context(status_
     set_strategy_position(market, None, None)
     market._execute_strategy_result(result(SignalAction.EXIT_CE), TIME)
     replace_status(client, "fake-order-2", status_record)
+    market.live_readiness_gate.apply_recovery_result(
+        LiveRecoveryResult(
+            LiveRecoveryState.SAFE_FLAT, (), (), "Artificial test restoration."
+        )
+    )
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
     market.reconcile_pending_live_order()
 
     assert market.pending_live_order is None
     assert market.live_execution_context is active_context
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_reconcile_read_failure_preserves_pending_and_context_without_retry():
@@ -1013,6 +1056,12 @@ def test_reconcile_read_failure_preserves_pending_and_context_without_retry():
     market._execute_strategy_result(result(SignalAction.EXIT_CE), TIME)
     pending = market.pending_live_order
     client.status_exception = RuntimeError("status unavailable")
+    market.live_readiness_gate.apply_recovery_result(
+        LiveRecoveryResult(
+            LiveRecoveryState.SAFE_FLAT, (), (), "Artificial test restoration."
+        )
+    )
+    assert market.live_readiness_gate.state is LiveReadinessState.READY
 
     with pytest.raises(RuntimeError, match="status unavailable"):
         market.reconcile_pending_live_order()
@@ -1021,6 +1070,7 @@ def test_reconcile_read_failure_preserves_pending_and_context_without_retry():
     assert client.order_history_calls == ["fake-order-1", "fake-order-2", "fake-order-2"]
     assert market.pending_live_order is pending
     assert market.live_execution_context is active_context
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_reconcile_without_pending_order_is_a_clear_state_error():
@@ -1082,6 +1132,7 @@ def test_unexpected_broker_exposure_blocks_live_buy_before_order_work(positions)
     assert client.order_history_calls == []
     assert market.live_execution_context is None
     assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 @pytest.mark.parametrize(
@@ -1114,6 +1165,7 @@ def test_broker_position_mismatch_blocks_live_exit_before_order_work(positions):
     assert len(client.order_history_calls) == reads_before
     assert market.live_execution_context is context
     assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_pending_order_guard_precedes_live_position_read():
@@ -1155,6 +1207,7 @@ def test_reversal_rechecks_broker_positions_after_filled_exit():
     assert [call["transaction_type"] for call in client.calls] == ["BUY", "SELL"]
     assert len(client.position_calls) == 3
     assert market.live_execution_context is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_target_exit_mismatch_blocks_sell_and_preserves_context():
@@ -1174,6 +1227,7 @@ def test_target_exit_mismatch_blocks_sell_and_preserves_context():
     assert [call["transaction_type"] for call in client.calls] == ["BUY"]
     assert market.live_execution_context is context
     assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_position_read_failure_propagates_before_submission_without_retry():
@@ -1189,6 +1243,7 @@ def test_live_position_read_failure_propagates_before_submission_without_retry()
     assert client.order_history_calls == []
     assert market.live_execution_context is None
     assert market.pending_live_order is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 @pytest.mark.parametrize(
@@ -1339,3 +1394,42 @@ def test_not_ready_target_exit_is_blocked_before_sell_and_preserves_context():
     assert len(client.position_calls) == position_reads
     assert market.live_execution_context is context
     assert market.pending_live_order is None
+
+
+def test_revoked_gate_blocks_until_external_safe_recovery_restores_it():
+    client = FakeKiteClient(exception=RuntimeError("broker unavailable"))
+    market, client = make_market(client=client)
+    gate = market.live_readiness_gate
+    set_strategy_position(market, "CE", 27.0)
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+
+    position_reads = len(client.position_calls)
+    with pytest.raises(LiveReadinessError):
+        market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+
+    assert len(client.position_calls) == position_reads
+    assert len(client.calls) == 1
+
+    client.exception = None
+    restored_result = LiveRecoveryResult(
+        LiveRecoveryState.SAFE_FLAT,
+        (),
+        (),
+        "External recovery restored session authorization.",
+    )
+    gate.apply_recovery_result(restored_result)
+
+    assert market._execute_strategy_result(
+        result(SignalAction.BUY_CE), TIME
+    ) == ("fake-order-2",)
+    assert gate.state is LiveReadinessState.READY
+    assert gate.last_recovery_result is restored_result
+
+
+def test_market_data_can_revoke_but_cannot_apply_recovery_results():
+    source = inspect.getsource(MarketData)
+
+    assert ".revoke()" in source
+    assert "apply_recovery_result" not in source
