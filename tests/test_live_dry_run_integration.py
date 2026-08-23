@@ -10,8 +10,11 @@ from trading.live_execution import (
     LiveExecutionCoordinator,
     LiveExecutionDisabledError,
 )
+from trading.live_readiness import LiveReadinessGate, LiveReadinessState
+from trading.live_recovery import LiveRecoveryResult, LiveRecoveryState
 from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.market import (
+    LiveReadinessError,
     LivePositionReconciliationError,
     MarketData,
     PendingLiveOrderError,
@@ -98,7 +101,13 @@ class FakeKiteClient:
         return {"net": list(self.net_positions), "day": []}
 
 
-def make_market(enabled=True, client=None, status_records=None, status_exception=None):
+def make_market(
+    enabled=True,
+    client=None,
+    status_records=None,
+    status_exception=None,
+    readiness_gate=None,
+):
     client = client or FakeKiteClient(
         status_records=status_records,
         status_exception=status_exception,
@@ -110,6 +119,16 @@ def make_market(enabled=True, client=None, status_records=None, status_exception
     )
     status_reader = ZerodhaOrderStatusReader(client)
     position_reader = ZerodhaPositionReader(client)
+    if readiness_gate is None:
+        readiness_gate = LiveReadinessGate()
+        readiness_gate.apply_recovery_result(
+            LiveRecoveryResult(
+                LiveRecoveryState.SAFE_FLAT,
+                (),
+                (),
+                "Explicit test authorization.",
+            )
+        )
     market = MarketData(
         kite=None,
         instruments=None,
@@ -118,6 +137,7 @@ def make_market(enabled=True, client=None, status_records=None, status_exception
         live_order_status_reader=status_reader,
         live_position_reader=position_reader,
         live_position_reconciler=BrokerPositionReconciler(),
+        live_readiness_gate=readiness_gate,
     )
     market.nifty_option_pair = {
         "CE": {"tradingsymbol": "NIFTY2682125000CE", "lot_size": 75},
@@ -231,6 +251,43 @@ def test_live_market_rejects_invalid_status_reader():
             live_execution_coordinator=coordinator,
             live_order_status_reader=object(),
         )
+
+
+def test_live_market_requires_valid_explicit_readiness_gate():
+    client = FakeKiteClient()
+    dependencies = {
+        "live_execution_coordinator": LiveExecutionCoordinator(
+            ZerodhaOrderAdapter(), ZerodhaOrderSubmitter(client), enabled=True
+        ),
+        "live_order_status_reader": ZerodhaOrderStatusReader(client),
+        "live_position_reader": ZerodhaPositionReader(client),
+        "live_position_reconciler": BrokerPositionReconciler(),
+    }
+
+    with pytest.raises(TypeError, match="LiveReadinessGate"):
+        MarketData(None, None, execution_mode=ExecutionMode.LIVE, **dependencies)
+
+    with pytest.raises(TypeError, match="LiveReadinessGate"):
+        MarketData(
+            None,
+            None,
+            execution_mode=ExecutionMode.LIVE,
+            live_readiness_gate=object(),
+            **dependencies,
+        )
+
+
+def test_live_market_does_not_activate_a_new_readiness_gate():
+    gate = LiveReadinessGate()
+
+    market, client = make_market(readiness_gate=gate)
+
+    assert market.live_readiness_gate is gate
+    assert gate.state is LiveReadinessState.NOT_READY
+    assert gate.last_recovery_result is None
+    assert client.position_calls == []
+    assert client.calls == []
+    assert client.order_history_calls == []
 
 
 @pytest.mark.parametrize(
@@ -1131,4 +1188,154 @@ def test_live_position_read_failure_propagates_before_submission_without_retry()
     assert client.calls == []
     assert client.order_history_calls == []
     assert market.live_execution_context is None
+    assert market.pending_live_order is None
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        SignalAction.BUY_CE,
+        SignalAction.BUY_PE,
+        SignalAction.EXIT_CE,
+        SignalAction.EXIT_PE,
+    ],
+)
+def test_not_ready_blocks_every_non_hold_live_action_before_broker_work(action):
+    gate = LiveReadinessGate()
+    market, client = make_market(readiness_gate=gate)
+    original_context = market.live_execution_context
+    original_pending = market.pending_live_order
+
+    with pytest.raises(LiveReadinessError, match="READY LiveReadinessGate"):
+        market._execute_strategy_result(result(action), TIME)
+
+    assert gate.state is LiveReadinessState.NOT_READY
+    assert market.live_execution_context is original_context
+    assert market.pending_live_order is original_pending
+    assert client.position_calls == []
+    assert client.calls == []
+    assert client.order_history_calls == []
+
+
+def test_pending_order_guard_precedes_not_ready_guard_and_all_broker_work():
+    gate = LiveReadinessGate()
+    gate.apply_recovery_result(
+        LiveRecoveryResult(
+            LiveRecoveryState.SAFE_FLAT, (), (), "Explicit test authorization."
+        )
+    )
+    market, client = make_market(
+        readiness_gate=gate,
+        status_records=[
+            {
+                "status": "OPEN",
+                "filled_quantity": 0,
+                "pending_quantity": 75,
+                "average_price": 0.0,
+            }
+        ],
+    )
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    gate.revoke()
+    position_reads = len(client.position_calls)
+    submissions = len(client.calls)
+    status_reads = len(client.order_history_calls)
+
+    with pytest.raises(PendingLiveOrderError):
+        market._execute_strategy_result(result(SignalAction.BUY_PE), TIME)
+
+    assert len(client.position_calls) == position_reads
+    assert len(client.calls) == submissions
+    assert len(client.order_history_calls) == status_reads
+    assert gate.state is LiveReadinessState.NOT_READY
+
+
+def test_hold_is_noop_when_live_gate_is_not_ready():
+    gate = LiveReadinessGate()
+    market, client = make_market(readiness_gate=gate)
+
+    execution_results = market._execute_strategy_result(
+        result(SignalAction.HOLD), TIME
+    )
+
+    assert execution_results == ()
+    assert gate.state is LiveReadinessState.NOT_READY
+    assert client.position_calls == []
+    assert client.calls == []
+    assert client.order_history_calls == []
+
+
+def test_pending_reconciliation_remains_available_and_does_not_change_readiness():
+    gate = LiveReadinessGate()
+    gate.apply_recovery_result(
+        LiveRecoveryResult(
+            LiveRecoveryState.SAFE_FLAT, (), (), "Explicit test authorization."
+        )
+    )
+    market, client = make_market(
+        readiness_gate=gate,
+        status_records=[
+            {
+                "status": "OPEN",
+                "filled_quantity": 0,
+                "pending_quantity": 75,
+                "average_price": 0.0,
+            }
+        ],
+    )
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    gate.revoke()
+    submissions = len(client.calls)
+    position_reads = len(client.position_calls)
+
+    market.reconcile_pending_live_order()
+
+    assert gate.state is LiveReadinessState.NOT_READY
+    assert len(client.calls) == submissions
+    assert len(client.position_calls) == position_reads
+    assert client.order_history_calls == ["fake-order-1", "fake-order-1"]
+
+
+def test_ready_persists_across_successful_live_action_and_reversal():
+    market, client = make_market()
+    gate = market.live_readiness_gate
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    set_strategy_position(market, "PE", 31.0)
+
+    market._execute_strategy_result(
+        result(
+            SignalAction.EXIT_CE,
+            (SignalAction.EXIT_CE, SignalAction.BUY_PE),
+        ),
+        TIME + timedelta(minutes=1),
+    )
+
+    assert gate.state is LiveReadinessState.READY
+    assert [call["transaction_type"] for call in client.calls] == [
+        "BUY",
+        "SELL",
+        "BUY",
+    ]
+    assert len(client.position_calls) == 3
+
+
+def test_not_ready_target_exit_is_blocked_before_sell_and_preserves_context():
+    market, client = make_market()
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    context = market.live_execution_context
+    market.live_readiness_gate.revoke()
+    market.latest_completed_snapshot = IndicatorSnapshot(
+        candle=Candle(TIME, 100, 100, 100, 100), values={"ema": {}}
+    )
+    market.latest_option_premiums["CE"] = 29.0
+    position_reads = len(client.position_calls)
+
+    with pytest.raises(LiveReadinessError):
+        market._monitor_live_option_target(TIME + timedelta(minutes=1))
+
+    assert [call["transaction_type"] for call in client.calls] == ["BUY"]
+    assert len(client.position_calls) == position_reads
+    assert market.live_execution_context is context
     assert market.pending_live_order is None

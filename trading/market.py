@@ -19,6 +19,7 @@ from trading.candle import Candle
 from trading.execution_mode import ExecutionMode
 from trading.execution_router import ExecutionRouter
 from trading.live_execution import LiveExecutionCoordinator
+from trading.live_readiness import LiveReadinessGate
 from trading.live_order import LiveOrderIntent
 from trading.broker_order_status import BrokerOrderState
 from trading.broker_position_reconciler import (
@@ -54,6 +55,10 @@ class PendingLiveOrderError(RuntimeError):
     """Raised when a LIVE action would conflict with an unresolved order."""
 
 
+class LiveReadinessError(RuntimeError):
+    """Raised when LIVE execution has not been explicitly authorized."""
+
+
 class LivePositionReconciliationError(RuntimeError):
     """Raised when broker net exposure cannot safely permit a LIVE action."""
 
@@ -73,6 +78,7 @@ class MarketData:
         live_order_status_reader=None,
         live_position_reader=None,
         live_position_reconciler=None,
+        live_readiness_gate=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -116,6 +122,14 @@ class MarketData:
                 "LIVE execution requires a BrokerPositionReconciler."
             )
 
+        if (
+            execution_mode is ExecutionMode.LIVE
+            and not isinstance(live_readiness_gate, LiveReadinessGate)
+        ):
+            raise TypeError(
+                "LIVE execution requires a LiveReadinessGate."
+            )
+
         self.kite = kite
 
         self.instruments = instruments
@@ -138,6 +152,7 @@ class MarketData:
         self.live_order_status_reader = live_order_status_reader
         self.live_position_reader = live_position_reader
         self.live_position_reconciler = live_position_reconciler
+        self.live_readiness_gate = live_readiness_gate
         self.live_execution_context = None
         self.pending_live_order = None
         self.latest_live_position_reconciliation = None
@@ -262,6 +277,10 @@ class MarketData:
                 )
 
             if self.execution_router.mode is ExecutionMode.LIVE:
+                if not self.live_readiness_gate.is_ready:
+                    raise LiveReadinessError(
+                        "LIVE execution requires a READY LiveReadinessGate."
+                    )
                 self._validate_live_broker_position_before_action()
 
             side = "CE" if action in (
