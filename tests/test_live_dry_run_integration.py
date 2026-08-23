@@ -24,6 +24,8 @@ from trading.market import (
 )
 from trading.position import ManagedPosition, PositionSide, PositionState
 from trading.position_manager import PositionManager
+from trading.position_safety import PositionSafetyState
+from trading.position_safety_guard import PositionSafetyViolationError
 from trading.strategy import IndicatorSnapshot, SignalAction, StrategyResult
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -352,6 +354,7 @@ def test_live_buy_reaches_fake_broker_once(action, side, expected_quantity):
     assert client.calls[0]["product"] == "MIS"
     assert client.calls[0]["validity"] == "DAY"
     assert client.order_history_calls == ["fake-order-1"]
+    assert len(client.position_calls) == 1
     assert market.paper_trade_ledger.count == 0
     assert market.live_readiness_gate.state is LiveReadinessState.READY
 
@@ -387,6 +390,7 @@ def test_live_exit_uses_original_live_contract_context(
     assert market.live_execution_context is None
     assert market.paper_trade_ledger.count == 0
     assert client.order_history_calls == ["fake-order-1", "fake-order-2"]
+    assert len(client.position_calls) == 2
     assert market.live_readiness_gate.state is LiveReadinessState.READY
 
 
@@ -587,7 +591,7 @@ def test_live_wrong_side_exit_is_rejected_without_mutating_context(
     active_context = market.live_execution_context
     set_strategy_position(market, None, None)
 
-    with pytest.raises(ValueError, match="does not match"):
+    with pytest.raises(PositionSafetyViolationError, match="does not match"):
         market._execute_strategy_result(
             result(exit_action),
             TIME + timedelta(minutes=1),
@@ -595,6 +599,8 @@ def test_live_wrong_side_exit_is_rejected_without_mutating_context(
 
     assert len(client.calls) == 1
     assert market.live_execution_context is active_context
+    assert market.live_position_manager.active_position.side.value == side
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_duplicate_buy_is_rejected_without_mutating_context():
@@ -603,7 +609,8 @@ def test_live_duplicate_buy_is_rejected_without_mutating_context():
     market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
     active_context = market.live_execution_context
 
-    with pytest.raises(ValueError, match="already active"):
+    calls_before = len(client.calls)
+    with pytest.raises(PositionSafetyViolationError, match="safely flat"):
         market._execute_strategy_result(
             result(SignalAction.BUY_PE),
             TIME + timedelta(minutes=1),
@@ -611,6 +618,23 @@ def test_live_duplicate_buy_is_rejected_without_mutating_context():
 
     assert len(client.calls) == 1
     assert market.live_execution_context is active_context
+    assert len(client.calls) == calls_before
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
+
+
+def test_safe_flat_exit_is_blocked_before_submission_and_revokes_readiness():
+    market, client = make_market()
+    set_strategy_position(market, None, None)
+
+    with pytest.raises(PositionSafetyViolationError, match="safely open"):
+        market._execute_strategy_result(result(SignalAction.EXIT_CE), TIME)
+
+    assert client.calls == []
+    assert len(client.position_calls) == 1
+    assert market.live_position_manager.active_position is None
+    assert market.live_execution_context is None
+    assert market.latest_position_safety_result.state is PositionSafetyState.SAFE_FLAT
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 def test_live_hold_warmup_and_duplicate_candle_submit_nothing():

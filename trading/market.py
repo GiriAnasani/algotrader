@@ -29,6 +29,12 @@ from trading.broker_position_reconciler import (
 from trading.pending_live_order import PendingLiveOrder
 from trading.position import PositionSide
 from trading.position_manager import PositionManager
+from trading.position_recovery import PositionRecoveryCoordinator
+from trading.position_safety import PositionSafetyEvaluator
+from trading.position_safety_guard import (
+    PositionSafetyGuard,
+    PositionSafetyViolationError,
+)
 from trading.open_position_lifecycle import (
     ConfirmedPositionEntry,
     OpenPositionLifecycle,
@@ -175,6 +181,21 @@ class MarketData:
         self.live_position_reconciler = live_position_reconciler
         self.live_readiness_gate = live_readiness_gate
         self.live_position_manager = live_position_manager
+        self.live_position_recovery_coordinator = (
+            PositionRecoveryCoordinator(live_position_manager)
+            if execution_mode is ExecutionMode.LIVE
+            else None
+        )
+        self.live_position_safety_evaluator = (
+            PositionSafetyEvaluator()
+            if execution_mode is ExecutionMode.LIVE
+            else None
+        )
+        self.live_position_safety_guard = (
+            PositionSafetyGuard()
+            if execution_mode is ExecutionMode.LIVE
+            else None
+        )
         self.live_open_position_lifecycle = (
             OpenPositionLifecycle(live_position_manager)
             if execution_mode is ExecutionMode.LIVE
@@ -189,6 +210,7 @@ class MarketData:
         self.latest_closed_position = None
         self.pending_live_order = None
         self.latest_live_position_reconciliation = None
+        self.latest_position_safety_result = None
         self.paper_trade_ledger = PaperTradeLedger()
 
         # Processed completed candle identities
@@ -314,7 +336,8 @@ class MarketData:
                     raise LiveReadinessError(
                         "LIVE execution requires a READY LiveReadinessGate."
                     )
-                self._validate_live_broker_position_before_action()
+                self._validate_live_position_context_consistency()
+                broker_positions = self._validate_live_broker_position_before_action()
 
             side = "CE" if action in (
                 SignalAction.BUY_CE,
@@ -323,12 +346,6 @@ class MarketData:
             premium = self.latest_option_premiums.get(side)
 
             if action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
-                if (
-                    self.execution_router.mode is ExecutionMode.LIVE
-                    and self.live_execution_context is not None
-                ):
-                    raise ValueError("A live execution context is already active.")
-
                 if self.nifty_option_pair is None:
                     raise ValueError("NIFTY option pair has not been selected.")
 
@@ -339,11 +356,14 @@ class MarketData:
                 if self.execution_router.mode is ExecutionMode.LIVE:
                     active_context = self.live_execution_context
                     if active_context is None:
-                        raise ValueError("No live execution context is active.")
-
-                    if active_context.side != side:
-                        raise ValueError(
-                            "Exit action does not match the live execution context side."
+                        self._validate_live_position_safety_before_action(
+                            action,
+                            None,
+                            None,
+                            broker_positions,
+                        )
+                        raise AssertionError(
+                            "Unsafe flat EXIT unexpectedly passed position safety."
                         )
 
                     contract_symbol = active_context.contract_symbol
@@ -362,6 +382,14 @@ class MarketData:
                     )
             else:
                 raise ValueError("Unsupported strategy action for execution.")
+
+            if self.execution_router.mode is ExecutionMode.LIVE:
+                self._validate_live_position_safety_before_action(
+                    action,
+                    contract_symbol,
+                    quantity,
+                    broker_positions,
+                )
 
             execution_result = self.execution_router.route(
                 action,
@@ -503,6 +531,27 @@ class MarketData:
                 f"LIVE broker position reconciliation is "
                 f"{reconciliation.state.value}: {reconciliation.message}"
             )
+        return broker_positions
+
+    def _validate_live_position_safety_before_action(
+        self, action, contract_symbol, quantity, broker_positions
+    ):
+        """Evaluate and enforce action-specific safety on the existing snapshot."""
+        recovery_result = self.live_position_recovery_coordinator.recover(
+            broker_positions
+        )
+        safety_result = self.live_position_safety_evaluator.evaluate(recovery_result)
+        self.latest_position_safety_result = safety_result
+        try:
+            self.live_position_safety_guard.validate(
+                action,
+                safety_result,
+                contract_symbol,
+                quantity,
+            )
+        except PositionSafetyViolationError:
+            self.live_readiness_gate.revoke()
+            raise
 
     def reconcile_pending_live_order(self):
         """Reads one pending LIVE order status without submitting an order."""
