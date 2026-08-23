@@ -27,6 +27,16 @@ from trading.broker_position_reconciler import (
     PositionReconciliationState,
 )
 from trading.pending_live_order import PendingLiveOrder
+from trading.position import PositionSide
+from trading.position_manager import PositionManager
+from trading.open_position_lifecycle import (
+    ConfirmedPositionEntry,
+    OpenPositionLifecycle,
+)
+from trading.close_position_lifecycle import (
+    ClosePositionLifecycle,
+    ConfirmedPositionExit,
+)
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
 from trading.zerodha_position_reader import ZerodhaPositionReader
 from trading.strategy import (
@@ -63,6 +73,10 @@ class LivePositionReconciliationError(RuntimeError):
     """Raised when broker net exposure cannot safely permit a LIVE action."""
 
 
+class LivePositionLifecycleError(RuntimeError):
+    """Raised when confirmed LIVE fill truth cannot update managed state."""
+
+
 class MarketData:
     """
     Handles downloading historical
@@ -79,6 +93,7 @@ class MarketData:
         live_position_reader=None,
         live_position_reconciler=None,
         live_readiness_gate=None,
+        live_position_manager=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -130,6 +145,12 @@ class MarketData:
                 "LIVE execution requires a LiveReadinessGate."
             )
 
+        if (
+            execution_mode is ExecutionMode.LIVE
+            and not isinstance(live_position_manager, PositionManager)
+        ):
+            raise TypeError("LIVE execution requires a PositionManager.")
+
         self.kite = kite
 
         self.instruments = instruments
@@ -153,7 +174,19 @@ class MarketData:
         self.live_position_reader = live_position_reader
         self.live_position_reconciler = live_position_reconciler
         self.live_readiness_gate = live_readiness_gate
+        self.live_position_manager = live_position_manager
+        self.live_open_position_lifecycle = (
+            OpenPositionLifecycle(live_position_manager)
+            if execution_mode is ExecutionMode.LIVE
+            else None
+        )
+        self.live_close_position_lifecycle = (
+            ClosePositionLifecycle(live_position_manager)
+            if execution_mode is ExecutionMode.LIVE
+            else None
+        )
         self.live_execution_context = None
+        self.latest_closed_position = None
         self.pending_live_order = None
         self.latest_live_position_reconciliation = None
         self.paper_trade_ledger = PaperTradeLedger()
@@ -492,14 +525,11 @@ class MarketData:
     def _apply_live_order_status(self, order_id, order, broker_status):
         """Applies normalized status only to confirmed or pending continuity."""
         if self._is_confirmed_full_fill(order, broker_status):
-            if order.action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
-                self.live_execution_context = LiveExecutionContext(
-                    side=order.side,
-                    contract_symbol=order.contract_symbol,
-                    quantity=order.quantity,
-                )
-            else:
-                self.live_execution_context = None
+            try:
+                self._apply_confirmed_live_position_fill(order, broker_status)
+            except Exception:
+                self.live_readiness_gate.revoke()
+                raise
             self.pending_live_order = None
             return False
 
@@ -516,6 +546,65 @@ class MarketData:
 
         self.pending_live_order = None
         return False
+
+    def _apply_confirmed_live_position_fill(self, order, broker_status):
+        """Applies broker-confirmed full-fill truth to Phase 8 managed state."""
+        if broker_status.fill_timestamp is None:
+            raise LivePositionLifecycleError(
+                "Confirmed full fill is missing a broker fill timestamp."
+            )
+
+        side = PositionSide[order.side]
+        if order.action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
+            managed_position = self.live_open_position_lifecycle.open(
+                ConfirmedPositionEntry(
+                    side=side,
+                    contract_symbol=order.contract_symbol,
+                    quantity=order.quantity,
+                    fill_price=broker_status.average_price,
+                    fill_time=broker_status.fill_timestamp,
+                )
+            )
+            self.live_execution_context = LiveExecutionContext(
+                side=order.side,
+                contract_symbol=order.contract_symbol,
+                quantity=order.quantity,
+            )
+            self._validate_live_position_context_consistency()
+            return managed_position
+
+        closed_position = self.live_close_position_lifecycle.close(
+            ConfirmedPositionExit(
+                side=side,
+                contract_symbol=order.contract_symbol,
+                quantity=order.quantity,
+                fill_price=broker_status.average_price,
+                fill_time=broker_status.fill_timestamp,
+            )
+        )
+        self.live_execution_context = None
+        self.latest_closed_position = closed_position
+        self._validate_live_position_context_consistency()
+        return closed_position
+
+    def _validate_live_position_context_consistency(self):
+        """Fails closed when Phase 7 context and Phase 8 authority disagree."""
+        context = self.live_execution_context
+        managed = self.live_position_manager.active_position
+        if context is None:
+            consistent = managed is None
+        else:
+            consistent = (
+                managed is not None
+                and managed.side.value == context.side
+                and managed.contract_symbol == context.contract_symbol
+                and managed.quantity == context.quantity
+            )
+        if not consistent:
+            self.live_readiness_gate.revoke()
+            raise LivePositionLifecycleError(
+                "LIVE execution context and managed position are inconsistent."
+            )
 
     @staticmethod
     def _is_confirmed_full_fill(order, broker_status):

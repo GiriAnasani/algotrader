@@ -15,11 +15,15 @@ from trading.live_readiness import LiveReadinessGate, LiveReadinessState
 from trading.live_recovery import LiveRecoveryResult, LiveRecoveryState
 from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.market import (
+    LiveExecutionContext,
     LiveReadinessError,
     LivePositionReconciliationError,
     MarketData,
     PendingLiveOrderError,
+    LivePositionLifecycleError,
 )
+from trading.position import ManagedPosition, PositionSide, PositionState
+from trading.position_manager import PositionManager
 from trading.strategy import IndicatorSnapshot, SignalAction, StrategyResult
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -67,6 +71,8 @@ class FakeKiteClient:
             }
         )
         record = {**record, "order_id": order_id}
+        record.setdefault("quantity", kwargs["quantity"])
+        record.setdefault("exchange_update_timestamp", "2026-08-21 09:15:00")
         self.history_by_order_id[order_id] = [record]
         if (
             record["status"] == "COMPLETE"
@@ -108,6 +114,7 @@ def make_market(
     status_records=None,
     status_exception=None,
     readiness_gate=None,
+    position_manager=None,
 ):
     client = client or FakeKiteClient(
         status_records=status_records,
@@ -130,6 +137,8 @@ def make_market(
                 "Explicit test authorization.",
             )
         )
+    if position_manager is None:
+        position_manager = PositionManager()
     market = MarketData(
         kite=None,
         instruments=None,
@@ -139,6 +148,7 @@ def make_market(
         live_position_reader=position_reader,
         live_position_reconciler=BrokerPositionReconciler(),
         live_readiness_gate=readiness_gate,
+        live_position_manager=position_manager,
     )
     market.nifty_option_pair = {
         "CE": {"tradingsymbol": "NIFTY2682125000CE", "lot_size": 75},
@@ -163,7 +173,11 @@ def set_strategy_position(market, side, premium):
 
 
 def replace_status(client, order_id, record):
-    client.history_by_order_id[order_id] = [{**record, "order_id": order_id}]
+    previous = client.history_by_order_id[order_id][-1]
+    replacement = {**record, "order_id": order_id}
+    replacement.setdefault("quantity", previous["quantity"])
+    replacement.setdefault("exchange_update_timestamp", "2026-08-21 09:16:00")
+    client.history_by_order_id[order_id] = [replacement]
 
 
 def broker_position(symbol="NIFTY2682125000CE", quantity=75, product="MIS"):
@@ -182,6 +196,30 @@ def test_market_data_defaults_to_paper_mode():
     assert market.execution_router.mode is ExecutionMode.PAPER
     assert market.strategy_engine.target_points == 2.0
     assert market.pending_live_order is None
+    assert market.live_position_manager is None
+
+
+def test_live_market_uses_exact_injected_position_manager_and_lifecycles():
+    manager = PositionManager()
+    market, _ = make_market(position_manager=manager)
+
+    assert market.live_position_manager is manager
+    assert market.live_open_position_lifecycle._position_manager is manager
+    assert market.live_close_position_lifecycle._position_manager is manager
+    assert market.latest_closed_position is None
+
+
+def test_live_market_requires_an_explicit_position_manager():
+    market, _ = make_market()
+    dependencies = {
+        "live_execution_coordinator": market.live_execution_coordinator,
+        "live_order_status_reader": market.live_order_status_reader,
+        "live_position_reader": market.live_position_reader,
+        "live_position_reconciler": market.live_position_reconciler,
+        "live_readiness_gate": market.live_readiness_gate,
+    }
+    with pytest.raises(TypeError, match="PositionManager"):
+        MarketData(None, None, execution_mode=ExecutionMode.LIVE, **dependencies)
 
 
 def test_paper_execution_never_creates_pending_state_or_reads_live_status():
@@ -390,6 +428,7 @@ def test_live_reversal_submits_exit_then_buy(
         "BUY",
     ]
     assert market.live_execution_context.side == next_side
+    assert market.live_position_manager.active_position.side.value == next_side
     assert market.paper_trade_ledger.count == 0
     assert market.live_readiness_gate.state is LiveReadinessState.READY
 
@@ -899,6 +938,10 @@ def test_reconcile_pending_buy_complete_creates_context_without_submission():
     assert client.order_history_calls == ["fake-order-1", "fake-order-1"]
     assert market.pending_live_order is None
     assert market.live_execution_context.side == "CE"
+    opened = market.live_position_manager.active_position
+    assert opened.side is PositionSide.CE
+    assert opened.entry_price == 27.0
+    assert opened.entry_time == datetime(2026, 8, 21, 9, 16, tzinfo=IST)
     assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
@@ -921,6 +964,7 @@ def test_reconcile_pending_buy_partial_complete_keeps_pending_without_context():
 
     assert market.pending_live_order == pending
     assert market.live_execution_context is None
+    assert market.live_position_manager.active_position is None
     assert len(client.calls) == 1
     assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
@@ -954,6 +998,11 @@ def test_reconcile_pending_exit_complete_clears_context_without_reversal_buy():
     assert [call["transaction_type"] for call in client.calls] == ["BUY", "SELL"]
     assert market.pending_live_order is None
     assert market.live_execution_context is None
+    assert market.live_position_manager.active_position is None
+    assert market.latest_closed_position.state is PositionState.CLOSED
+    assert market.latest_closed_position.exit_time == datetime(
+        2026, 8, 21, 9, 16, tzinfo=IST
+    )
     assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
@@ -978,6 +1027,7 @@ def test_reconcile_pending_exit_partial_complete_keeps_context_and_pending():
 
     assert market.pending_live_order == pending
     assert market.live_execution_context is active_context
+    assert market.live_position_manager.active_position is not None
     assert len(client.calls) == 2
     assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
@@ -1108,6 +1158,173 @@ def test_live_market_requires_position_reader_and_reconciler():
             live_order_status_reader=status_reader,
             live_position_reader=ZerodhaPositionReader(client),
         )
+
+
+@pytest.mark.parametrize(
+    ("action", "side", "quantity", "price"),
+    [
+        (SignalAction.BUY_CE, PositionSide.CE, 75, 28.5),
+        (SignalAction.BUY_PE, PositionSide.PE, 50, 32.25),
+    ],
+)
+def test_confirmed_live_buy_opens_managed_position_from_broker_fill_truth(
+    action, side, quantity, price
+):
+    timestamp_text = "2026-08-21 09:15:07"
+    market, _ = make_market(
+        status_records=[
+            {
+                "status": "COMPLETE",
+                "filled_quantity": quantity,
+                "pending_quantity": 0,
+                "average_price": price,
+                "exchange_update_timestamp": timestamp_text,
+            }
+        ]
+    )
+    set_strategy_position(market, side.value, price)
+
+    market._execute_strategy_result(result(action), TIME)
+
+    managed = market.live_position_manager.active_position
+    context = market.live_execution_context
+    assert managed.state is PositionState.OPEN
+    assert managed.side is side
+    assert managed.contract_symbol == market.nifty_option_pair[side.value]["tradingsymbol"]
+    assert managed.quantity == quantity
+    assert managed.entry_price == price
+    assert managed.entry_time == datetime(2026, 8, 21, 9, 15, 7, tzinfo=IST)
+    assert context.side == managed.side.value
+    assert context.contract_symbol == managed.contract_symbol
+    assert context.quantity == managed.quantity
+
+
+@pytest.mark.parametrize(
+    ("buy_action", "exit_action", "side", "quantity"),
+    [
+        (SignalAction.BUY_CE, SignalAction.EXIT_CE, PositionSide.CE, 75),
+        (SignalAction.BUY_PE, SignalAction.EXIT_PE, PositionSide.PE, 50),
+    ],
+)
+def test_confirmed_live_exit_closes_managed_position_from_broker_fill_truth(
+    buy_action, exit_action, side, quantity
+):
+    market, client = make_market(
+        status_records=[
+            {
+                "status": "COMPLETE", "filled_quantity": quantity,
+                "pending_quantity": 0, "average_price": 27.25,
+                "exchange_update_timestamp": "2026-08-21 09:15:00",
+            },
+            {
+                "status": "COMPLETE", "filled_quantity": quantity,
+                "pending_quantity": 0, "average_price": 30.75,
+                "exchange_update_timestamp": "2026-08-21 09:16:00",
+            },
+        ]
+    )
+    set_strategy_position(market, side.value, 27.0)
+    market._execute_strategy_result(result(buy_action), TIME)
+    opened = market.live_position_manager.active_position
+    set_strategy_position(market, None, None)
+
+    market._execute_strategy_result(result(exit_action), TIME + timedelta(minutes=1))
+
+    closed = market.latest_closed_position
+    assert market.live_position_manager.active_position is None
+    assert market.live_execution_context is None
+    assert closed.state is PositionState.CLOSED
+    assert closed.side is opened.side
+    assert closed.contract_symbol == opened.contract_symbol
+    assert closed.quantity == opened.quantity
+    assert closed.entry_price == opened.entry_price
+    assert closed.entry_time is opened.entry_time
+    assert closed.exit_price == 30.75
+    assert closed.exit_time == datetime(2026, 8, 21, 9, 16, tzinfo=IST)
+    assert len(client.calls) == 2
+
+
+@pytest.mark.parametrize("action", [SignalAction.BUY_CE, SignalAction.BUY_PE])
+def test_confirmed_buy_missing_fill_timestamp_fails_closed_and_revokes(action):
+    side = "CE" if action is SignalAction.BUY_CE else "PE"
+    quantity = 75 if side == "CE" else 50
+    market, _ = make_market(
+        status_records=[
+            {
+                "status": "COMPLETE", "filled_quantity": quantity,
+                "pending_quantity": 0, "average_price": 27.0,
+                "exchange_update_timestamp": None,
+            }
+        ]
+    )
+    set_strategy_position(market, side, 27.0)
+    with pytest.raises(LivePositionLifecycleError, match="fill timestamp"):
+        market._execute_strategy_result(result(action), TIME)
+    assert market.live_position_manager.active_position is None
+    assert market.live_execution_context is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
+
+
+def test_confirmed_exit_missing_fill_timestamp_retains_managed_position_and_revokes():
+    market, client = make_market()
+    set_strategy_position(market, "CE", 27.0)
+    market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    active = market.live_position_manager.active_position
+    client.status_records.append(
+        {
+            "status": "COMPLETE", "filled_quantity": 75,
+            "pending_quantity": 0, "average_price": 30.0,
+            "exchange_update_timestamp": None,
+        }
+    )
+    set_strategy_position(market, None, None)
+    with pytest.raises(LivePositionLifecycleError, match="fill timestamp"):
+        market._execute_strategy_result(
+            result(SignalAction.EXIT_CE), TIME + timedelta(minutes=1)
+        )
+    assert market.live_position_manager.active_position is active
+    assert market.live_execution_context is not None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
+
+
+def test_confirmed_buy_conflict_preserves_existing_position_and_revokes():
+    manager = PositionManager()
+    existing = ManagedPosition(
+        PositionSide.PE, "NIFTY2682125000PE", 50, 31.0, TIME, PositionState.OPEN
+    )
+    manager.register(existing)
+    market, _ = make_market(position_manager=manager)
+    set_strategy_position(market, "CE", 27.0)
+    with pytest.raises(RuntimeError):
+        market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+    assert manager.active_position is existing
+    assert market.live_execution_context is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
+
+
+def test_confirmed_exit_with_flat_manager_fails_and_revokes_without_context_clear():
+    market, client = make_market()
+    market.live_execution_context = LiveExecutionContext(
+        "CE", "NIFTY2682125000CE", 75
+    )
+    client.net_positions = [broker_position()]
+    set_strategy_position(market, None, None)
+    with pytest.raises(RuntimeError):
+        market._execute_strategy_result(result(SignalAction.EXIT_CE), TIME)
+    assert market.live_position_manager.active_position is None
+    assert market.live_execution_context is not None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
+
+
+def test_live_context_manager_mismatch_is_detected_and_revokes_readiness():
+    market, _ = make_market()
+    market.live_execution_context = LiveExecutionContext(
+        "CE", "NIFTY2682125000CE", 75
+    )
+    with pytest.raises(LivePositionLifecycleError, match="inconsistent"):
+        market._validate_live_position_context_consistency()
+    assert market.live_position_manager.active_position is None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
 
 
 @pytest.mark.parametrize(

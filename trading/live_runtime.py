@@ -7,6 +7,7 @@ from trading.live_execution import LiveExecutionCoordinator
 from trading.live_readiness import LiveReadinessGate
 from trading.live_recovery import LiveRecoveryCoordinator
 from trading.live_session_bootstrap import LiveSessionBootstrap
+from trading.position_manager import PositionManager
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_list_reader import ZerodhaOrderListReader
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -28,6 +29,7 @@ class LiveRuntimeComponents:
     order_submitter: ZerodhaOrderSubmitter
     execution_coordinator: LiveExecutionCoordinator
     position_reconciler: BrokerPositionReconciler
+    position_manager: PositionManager
 
 
 def build_live_runtime(kite_client, execution_enabled=False):
@@ -38,6 +40,7 @@ def build_live_runtime(kite_client, execution_enabled=False):
         raise TypeError("Execution enabled must be a boolean.")
 
     readiness_gate = LiveReadinessGate()
+    position_manager = PositionManager()
     position_reader = ZerodhaPositionReader(kite_client)
     order_list_reader = ZerodhaOrderListReader(kite_client)
     position_reconciler = BrokerPositionReconciler()
@@ -70,4 +73,5 @@ def build_live_runtime(kite_client, execution_enabled=False):
         order_submitter=order_submitter,
         execution_coordinator=execution_coordinator,
         position_reconciler=position_reconciler,
+        position_manager=position_manager,
     )

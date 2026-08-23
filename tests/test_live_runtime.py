@@ -9,6 +9,7 @@ from trading.live_readiness import LiveReadinessGate, LiveReadinessState
 from trading.live_recovery import LiveRecoveryCoordinator
 from trading.live_runtime import LiveRuntimeComponents, build_live_runtime
 from trading.live_session_bootstrap import LiveSessionBootstrap
+from trading.position_manager import PositionManager
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_list_reader import ZerodhaOrderListReader
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -59,6 +60,7 @@ EXPECTED_TYPES = {
     "order_submitter": ZerodhaOrderSubmitter,
     "execution_coordinator": LiveExecutionCoordinator,
     "position_reconciler": BrokerPositionReconciler,
+    "position_manager": PositionManager,
 }
 
 

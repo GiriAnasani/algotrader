@@ -81,6 +81,7 @@ def test_factory_builds_one_live_market_with_exact_runtime_dependencies(
     assert market.live_position_reader is runtime.position_reader
     assert market.live_position_reconciler is runtime.position_reconciler
     assert market.live_readiness_gate is gate
+    assert market.live_position_manager is runtime.position_manager
     assert runtime.execution_coordinator.enabled is execution_enabled
     assert gate.state is LiveReadinessState.NOT_READY
     assert gate.is_ready is False
@@ -103,6 +104,8 @@ def test_factory_does_not_rebuild_any_runtime_dependency_graph():
     assert runtime.order_list_reader._kite_client is client
     assert runtime.recovery_coordinator._position_reader is market.live_position_reader
     assert runtime.session_bootstrap._readiness_gate is market.live_readiness_gate
+    assert market.live_open_position_lifecycle._position_manager is runtime.position_manager
+    assert market.live_close_position_lifecycle._position_manager is runtime.position_manager
     assert_no_broker_calls(client)
 
 
