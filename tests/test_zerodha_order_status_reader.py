@@ -1,4 +1,6 @@
 import pytest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from trading.broker_order_status import BrokerOrderState
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -11,6 +13,7 @@ def make_record(status="OPEN", **overrides):
         "filled_quantity": 0,
         "pending_quantity": 75,
         "average_price": 0.0,
+        "quantity": 75,
     }
     values.update(overrides)
     return values
@@ -54,7 +57,13 @@ def test_reader_reads_once_and_selects_latest_history_record():
     client = FakeKiteClient(
         history=[
             make_record("OPEN"),
-            make_record("COMPLETE", filled_quantity=75, pending_quantity=0, average_price=28.0),
+            make_record(
+                "COMPLETE",
+                filled_quantity=75,
+                pending_quantity=0,
+                average_price=28.0,
+                exchange_update_timestamp="2026-08-23 09:30:01",
+            ),
         ]
     )
 
@@ -63,6 +72,9 @@ def test_reader_reads_once_and_selects_latest_history_record():
     assert client.order_history_calls == ["240821000001"]
     assert status.state is BrokerOrderState.COMPLETE
     assert status.average_price == 28.0
+    assert status.fill_timestamp == datetime(
+        2026, 8, 23, 9, 30, 1, tzinfo=ZoneInfo("Asia/Kolkata")
+    )
 
 
 def test_reader_rejects_mismatched_broker_response_order_id_without_retry():

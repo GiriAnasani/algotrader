@@ -1,6 +1,7 @@
 """Broker-independent immutable status for a submitted broker order."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from math import isfinite
 from numbers import Real
@@ -28,6 +29,7 @@ class BrokerOrderStatus:
     average_price: float
     broker_status: str
     status_message: str | None = None
+    fill_timestamp: datetime | None = None
 
     def __post_init__(self):
         self._validate_non_empty_string(self.order_id, "Order ID")
@@ -53,6 +55,15 @@ class BrokerOrderStatus:
             str,
         ):
             raise TypeError("Status message must be a string or None.")
+
+        if self.fill_timestamp is not None:
+            if not isinstance(self.fill_timestamp, datetime):
+                raise TypeError("Fill timestamp must be a datetime or None.")
+            if (
+                self.fill_timestamp.tzinfo is None
+                or self.fill_timestamp.utcoffset() is None
+            ):
+                raise ValueError("Fill timestamp must be timezone-aware.")
 
         object.__setattr__(self, "order_id", self.order_id.strip())
         object.__setattr__(self, "average_price", float(self.average_price))

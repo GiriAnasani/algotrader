@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timezone
 
 import pytest
 
@@ -14,6 +15,7 @@ def make_status(**overrides):
         "average_price": 27.5,
         "broker_status": "COMPLETE",
         "status_message": None,
+        "fill_timestamp": None,
     }
     values.update(overrides)
     return BrokerOrderStatus(**values)
@@ -28,6 +30,21 @@ def test_valid_broker_order_status_is_immutable():
 
     with pytest.raises(FrozenInstanceError):
         status.filled_quantity = 0
+
+
+def test_none_and_timezone_aware_fill_timestamps_are_accepted_and_preserved():
+    assert make_status(fill_timestamp=None).fill_timestamp is None
+    timestamp = datetime(2026, 8, 23, 9, 30, tzinfo=timezone.utc)
+    assert make_status(fill_timestamp=timestamp).fill_timestamp is timestamp
+
+
+@pytest.mark.parametrize(
+    "fill_timestamp",
+    [datetime(2026, 8, 23, 9, 30), "2026-08-23 09:30:00", 1, True, object()],
+)
+def test_invalid_fill_timestamp_is_rejected(fill_timestamp):
+    with pytest.raises((TypeError, ValueError)):
+        make_status(fill_timestamp=fill_timestamp)
 
 
 @pytest.mark.parametrize(
