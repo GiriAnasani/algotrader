@@ -29,6 +29,7 @@ from trading.broker_position_reconciler import (
 from trading.pending_live_order import PendingLiveOrder
 from trading.position import PositionSide
 from trading.position_manager import PositionManager
+from trading.position_store import PositionStore
 from trading.position_recovery import PositionRecoveryCoordinator
 from trading.position_safety import PositionSafetyEvaluator
 from trading.position_safety_guard import (
@@ -100,6 +101,7 @@ class MarketData:
         live_position_reconciler=None,
         live_readiness_gate=None,
         live_position_manager=None,
+        live_position_store=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -157,6 +159,11 @@ class MarketData:
         ):
             raise TypeError("LIVE execution requires a PositionManager.")
 
+        if live_position_store is not None and not isinstance(
+            live_position_store, PositionStore
+        ):
+            raise TypeError("Live position store must be a PositionStore or None.")
+
         self.kite = kite
 
         self.instruments = instruments
@@ -181,6 +188,7 @@ class MarketData:
         self.live_position_reconciler = live_position_reconciler
         self.live_readiness_gate = live_readiness_gate
         self.live_position_manager = live_position_manager
+        self.live_position_store = live_position_store
         self.live_position_recovery_coordinator = (
             PositionRecoveryCoordinator(live_position_manager)
             if execution_mode is ExecutionMode.LIVE
@@ -620,6 +628,7 @@ class MarketData:
                 quantity=order.quantity,
             )
             self._validate_live_position_context_consistency()
+            self._persist_live_position_state()
             return managed_position
 
         closed_position = self.live_close_position_lifecycle.close(
@@ -634,7 +643,13 @@ class MarketData:
         self.live_execution_context = None
         self.latest_closed_position = closed_position
         self._validate_live_position_context_consistency()
+        self._persist_live_position_state()
         return closed_position
+
+    def _persist_live_position_state(self):
+        """Persist exact confirmed manager truth when a store is configured."""
+        if self.live_position_store is not None:
+            self.live_position_store.save(self.live_position_manager)
 
     def _validate_live_position_context_consistency(self):
         """Fails closed when Phase 7 context and Phase 8 authority disagree."""

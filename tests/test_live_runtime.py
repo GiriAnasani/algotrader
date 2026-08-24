@@ -10,6 +10,7 @@ from trading.live_recovery import LiveRecoveryCoordinator
 from trading.live_runtime import LiveRuntimeComponents, build_live_runtime
 from trading.live_session_bootstrap import LiveSessionBootstrap
 from trading.position_manager import PositionManager
+from trading.position_store import PositionStore
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_list_reader import ZerodhaOrderListReader
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -61,6 +62,7 @@ EXPECTED_TYPES = {
     "execution_coordinator": LiveExecutionCoordinator,
     "position_reconciler": BrokerPositionReconciler,
     "position_manager": PositionManager,
+    "position_store": type(None),
 }
 
 
@@ -120,6 +122,18 @@ def test_all_broker_boundaries_share_exact_client_without_calls():
     assert components.order_status_reader._kite_client is client
     assert components.order_submitter._kite_client is client
     assert_no_broker_calls(client)
+
+
+def test_runtime_retains_exact_optional_position_store(tmp_path):
+    store = PositionStore(tmp_path / "position.json")
+    components = build_live_runtime(FakeKiteClient(), position_store=store)
+    assert components.position_store is store
+
+
+@pytest.mark.parametrize("store", [object(), "store", True])
+def test_runtime_rejects_invalid_position_store(store):
+    with pytest.raises(TypeError, match="PositionStore"):
+        build_live_runtime(FakeKiteClient(), position_store=store)
 
 
 def test_internal_dependency_graph_uses_exposed_exact_instances():

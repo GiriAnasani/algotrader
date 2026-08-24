@@ -7,6 +7,7 @@ from trading.live_market_factory import build_live_market_data
 from trading.live_readiness import LiveReadinessState
 from trading.live_runtime import build_live_runtime
 from trading.market import MarketData
+from trading.position_store import PositionStore
 
 
 class FakeKiteClient:
@@ -107,6 +108,15 @@ def test_factory_does_not_rebuild_any_runtime_dependency_graph():
     assert market.live_open_position_lifecycle._position_manager is runtime.position_manager
     assert market.live_close_position_lifecycle._position_manager is runtime.position_manager
     assert_no_broker_calls(client)
+
+
+def test_factory_injects_exact_runtime_position_store(tmp_path):
+    client = FakeKiteClient()
+    store = PositionStore(tmp_path / "position.json")
+    runtime = build_live_runtime(client, position_store=store)
+    market = build_live_market_data(client, object(), runtime)
+    assert runtime.position_store is store
+    assert market.live_position_store is store
 
 
 def test_factory_is_assembly_only_without_runtime_startup_calls():

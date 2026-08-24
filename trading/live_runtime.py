@@ -8,6 +8,7 @@ from trading.live_readiness import LiveReadinessGate
 from trading.live_recovery import LiveRecoveryCoordinator
 from trading.live_session_bootstrap import LiveSessionBootstrap
 from trading.position_manager import PositionManager
+from trading.position_store import PositionStore
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_list_reader import ZerodhaOrderListReader
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -30,14 +31,17 @@ class LiveRuntimeComponents:
     execution_coordinator: LiveExecutionCoordinator
     position_reconciler: BrokerPositionReconciler
     position_manager: PositionManager
+    position_store: PositionStore | None
 
 
-def build_live_runtime(kite_client, execution_enabled=False):
+def build_live_runtime(kite_client, execution_enabled=False, position_store=None):
     """Builds guarded LIVE dependencies without broker or recovery activity."""
     if kite_client is None:
         raise ValueError("A Kite-compatible client is required.")
     if not isinstance(execution_enabled, bool):
         raise TypeError("Execution enabled must be a boolean.")
+    if position_store is not None and not isinstance(position_store, PositionStore):
+        raise TypeError("Position store must be a PositionStore or None.")
 
     readiness_gate = LiveReadinessGate()
     position_manager = PositionManager()
@@ -74,4 +78,5 @@ def build_live_runtime(kite_client, execution_enabled=False):
         execution_coordinator=execution_coordinator,
         position_reconciler=position_reconciler,
         position_manager=position_manager,
+        position_store=position_store,
     )
