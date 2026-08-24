@@ -5,6 +5,7 @@ import pytest
 
 from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.closed_position_history import ClosedPositionHistory
+from trading.closed_position_history_store import ClosedPositionHistoryStore
 from trading.live_execution import LiveExecutionCoordinator
 from trading.live_readiness import LiveReadinessGate, LiveReadinessState
 from trading.live_recovery import LiveRecoveryCoordinator
@@ -64,6 +65,7 @@ EXPECTED_TYPES = {
     "position_reconciler": BrokerPositionReconciler,
     "position_manager": PositionManager,
     "closed_position_history": ClosedPositionHistory,
+    "closed_position_history_store": type(None),
     "position_store": type(None),
 }
 

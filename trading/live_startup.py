@@ -26,12 +26,15 @@ def initialize_live_session(
     instruments,
     execution_enabled=False,
     allowed_contract_symbols=None,
+    closed_position_history_store=None,
 ):
     """Builds LIVE dependencies and performs one explicit recovery inspection."""
-    runtime = build_live_runtime(
-        kite_client,
-        execution_enabled=execution_enabled,
-    )
+    runtime_arguments = {"execution_enabled": execution_enabled}
+    if closed_position_history_store is not None:
+        runtime_arguments["closed_position_history_store"] = (
+            closed_position_history_store
+        )
+    runtime = build_live_runtime(kite_client, **runtime_arguments)
     market = build_live_market_data(
         kite_client,
         instruments,

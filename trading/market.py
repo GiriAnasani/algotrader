@@ -30,6 +30,7 @@ from trading.pending_live_order import PendingLiveOrder
 from trading.position import PositionSide
 from trading.position_manager import PositionManager
 from trading.closed_position_history import ClosedPositionHistory
+from trading.closed_position_history_store import ClosedPositionHistoryStore
 from trading.position_store import PositionStore
 from trading.position_recovery import PositionRecoveryCoordinator
 from trading.position_safety import PositionSafetyEvaluator
@@ -103,6 +104,7 @@ class MarketData:
         live_readiness_gate=None,
         live_position_manager=None,
         live_closed_position_history=None,
+        live_closed_position_history_store=None,
         live_position_store=None,
     ):
 
@@ -171,6 +173,13 @@ class MarketData:
             raise TypeError(
                 "Live closed-position history must be a ClosedPositionHistory or None."
             )
+        if live_closed_position_history_store is not None and not isinstance(
+            live_closed_position_history_store, ClosedPositionHistoryStore
+        ):
+            raise TypeError(
+                "Live closed-position history store must be a "
+                "ClosedPositionHistoryStore or None."
+            )
 
         self.kite = kite
 
@@ -203,6 +212,7 @@ class MarketData:
             if execution_mode is ExecutionMode.LIVE
             else None
         )
+        self.live_closed_position_history_store = live_closed_position_history_store
         self.live_position_store = live_position_store
         self.live_position_recovery_coordinator = (
             PositionRecoveryCoordinator(live_position_manager)
@@ -659,6 +669,7 @@ class MarketData:
         self.live_closed_position_history.record(closed_position)
         self.latest_closed_position = self.live_closed_position_history.positions[-1]
         self._validate_live_position_context_consistency()
+        self._persist_live_closed_position_history()
         self._persist_live_position_state()
         return closed_position
 
@@ -666,6 +677,13 @@ class MarketData:
         """Persist exact confirmed manager truth when a store is configured."""
         if self.live_position_store is not None:
             self.live_position_store.save(self.live_position_manager)
+
+    def _persist_live_closed_position_history(self):
+        """Persist complete confirmed history when a store is configured."""
+        if self.live_closed_position_history_store is not None:
+            self.live_closed_position_history_store.save(
+                self.live_closed_position_history
+            )
 
     def _validate_live_position_context_consistency(self):
         """Fails closed when Phase 7 context and Phase 8 authority disagree."""

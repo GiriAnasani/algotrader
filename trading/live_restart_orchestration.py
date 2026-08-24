@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 from trading.live_continuity_readiness import LiveContinuityReadinessCoordinator
+from trading.closed_position_history import ClosedPositionHistory
+from trading.closed_position_history_store import ClosedPositionHistoryStore
 from trading.live_readiness import LiveReadinessGate
 from trading.live_recovery import LiveRecoveryResult, LiveRecoveryState
 from trading.live_runtime import LiveRuntimeComponents
@@ -162,10 +164,17 @@ class LiveRestartOrchestrationResult:
 class LiveRestartOrchestrator:
     """Compose existing restart primitives using startup's broker snapshot."""
 
-    def __init__(self, position_store):
+    def __init__(self, position_store, closed_position_history_store=None):
         if not isinstance(position_store, PositionStore):
             raise TypeError("Position store must be a PositionStore.")
         self._position_store = position_store
+        if closed_position_history_store is not None and not isinstance(
+            closed_position_history_store, ClosedPositionHistoryStore
+        ):
+            raise TypeError(
+                "Closed-position history store must be a ClosedPositionHistoryStore or None."
+            )
+        self._closed_position_history_store = closed_position_history_store
 
     def orchestrate(self, startup_result):
         """Explicitly establish durable continuity or return a blocked result."""
@@ -195,11 +204,16 @@ class LiveRestartOrchestrator:
         ):
             return self._blocked(startup_result, None, "Startup recovery is unresolved.")
 
+        history_store = self._resolve_closed_history_store(runtime)
+
         restart = PositionRestartCoordinator(self._position_store).recover(
             recovery.broker_positions
         )
         if restart.state is PositionRestartState.SAFE_FLAT:
             try:
+                self._restore_closed_history(
+                    runtime, startup_result, history_store
+                )
                 continuity = PositionContinuityVerifier(manager).verify(restart)
                 LiveContinuityReadinessCoordinator(gate).apply(continuity)
                 return LiveRestartOrchestrationResult(
@@ -218,6 +232,9 @@ class LiveRestartOrchestrator:
             restoration = None
             try:
                 restoration = PositionRestorer(manager).restore(restart)
+                self._restore_closed_history(
+                    runtime, startup_result, history_store
+                )
                 continuity = PositionContinuityVerifier(manager).verify(
                     restart, restoration
                 )
@@ -239,6 +256,35 @@ class LiveRestartOrchestrator:
             restart,
             "Durable and broker position continuity requires review.",
         )
+
+    def _resolve_closed_history_store(self, runtime):
+        orchestrator_store = self._closed_position_history_store
+        runtime_store = runtime.closed_position_history_store
+        if (
+            orchestrator_store is not None
+            and runtime_store is not None
+            and orchestrator_store is not runtime_store
+        ):
+            raise LiveRestartOrchestrationError(
+                "Runtime and orchestrator must share exact closed-history store."
+            )
+        return orchestrator_store if orchestrator_store is not None else runtime_store
+
+    def _restore_closed_history(self, runtime, startup_result, store):
+        if store is None:
+            return ()
+        history = runtime.closed_position_history
+        if not isinstance(history, ClosedPositionHistory):
+            raise TypeError("Runtime history must be a ClosedPositionHistory.")
+        if startup_result.market.live_closed_position_history is not history:
+            raise LiveRestartOrchestrationError(
+                "MarketData and runtime must share exact closed history."
+            )
+        positions = store.restore(history)
+        startup_result.market.latest_closed_position = (
+            positions[-1] if positions else None
+        )
+        return positions
 
     @staticmethod
     def _blocked(startup_result, restart_result, message):

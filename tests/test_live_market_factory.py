@@ -84,6 +84,7 @@ def test_factory_builds_one_live_market_with_exact_runtime_dependencies(
     assert market.live_readiness_gate is gate
     assert market.live_position_manager is runtime.position_manager
     assert market.live_closed_position_history is runtime.closed_position_history
+    assert market.live_closed_position_history_store is runtime.closed_position_history_store
     assert runtime.execution_coordinator.enabled is execution_enabled
     assert gate.state is LiveReadinessState.NOT_READY
     assert gate.is_ready is False

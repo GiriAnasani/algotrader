@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.closed_position_history import ClosedPositionHistory
+from trading.closed_position_history_store import ClosedPositionHistoryStore
 from trading.live_execution import LiveExecutionCoordinator
 from trading.live_readiness import LiveReadinessGate
 from trading.live_recovery import LiveRecoveryCoordinator
@@ -33,10 +34,16 @@ class LiveRuntimeComponents:
     position_reconciler: BrokerPositionReconciler
     position_manager: PositionManager
     closed_position_history: ClosedPositionHistory
+    closed_position_history_store: ClosedPositionHistoryStore | None
     position_store: PositionStore | None
 
 
-def build_live_runtime(kite_client, execution_enabled=False, position_store=None):
+def build_live_runtime(
+    kite_client,
+    execution_enabled=False,
+    position_store=None,
+    closed_position_history_store=None,
+):
     """Builds guarded LIVE dependencies without broker or recovery activity."""
     if kite_client is None:
         raise ValueError("A Kite-compatible client is required.")
@@ -44,6 +51,12 @@ def build_live_runtime(kite_client, execution_enabled=False, position_store=None
         raise TypeError("Execution enabled must be a boolean.")
     if position_store is not None and not isinstance(position_store, PositionStore):
         raise TypeError("Position store must be a PositionStore or None.")
+    if closed_position_history_store is not None and not isinstance(
+        closed_position_history_store, ClosedPositionHistoryStore
+    ):
+        raise TypeError(
+            "Closed-position history store must be a ClosedPositionHistoryStore or None."
+        )
 
     readiness_gate = LiveReadinessGate()
     position_manager = PositionManager()
@@ -82,5 +95,6 @@ def build_live_runtime(kite_client, execution_enabled=False, position_store=None
         position_reconciler=position_reconciler,
         position_manager=position_manager,
         closed_position_history=closed_position_history,
+        closed_position_history_store=closed_position_history_store,
         position_store=position_store,
     )
