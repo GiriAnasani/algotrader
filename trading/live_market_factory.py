@@ -24,5 +24,6 @@ def build_live_market_data(kite, instruments, runtime_components):
         live_position_reconciler=runtime_components.position_reconciler,
         live_readiness_gate=runtime_components.readiness_gate,
         live_position_manager=runtime_components.position_manager,
+        live_closed_position_history=runtime_components.closed_position_history,
         live_position_store=runtime_components.position_store,
     )

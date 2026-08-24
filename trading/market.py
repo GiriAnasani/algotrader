@@ -29,6 +29,7 @@ from trading.broker_position_reconciler import (
 from trading.pending_live_order import PendingLiveOrder
 from trading.position import PositionSide
 from trading.position_manager import PositionManager
+from trading.closed_position_history import ClosedPositionHistory
 from trading.position_store import PositionStore
 from trading.position_recovery import PositionRecoveryCoordinator
 from trading.position_safety import PositionSafetyEvaluator
@@ -101,6 +102,7 @@ class MarketData:
         live_position_reconciler=None,
         live_readiness_gate=None,
         live_position_manager=None,
+        live_closed_position_history=None,
         live_position_store=None,
     ):
 
@@ -163,6 +165,12 @@ class MarketData:
             live_position_store, PositionStore
         ):
             raise TypeError("Live position store must be a PositionStore or None.")
+        if live_closed_position_history is not None and not isinstance(
+            live_closed_position_history, ClosedPositionHistory
+        ):
+            raise TypeError(
+                "Live closed-position history must be a ClosedPositionHistory or None."
+            )
 
         self.kite = kite
 
@@ -188,6 +196,13 @@ class MarketData:
         self.live_position_reconciler = live_position_reconciler
         self.live_readiness_gate = live_readiness_gate
         self.live_position_manager = live_position_manager
+        self.live_closed_position_history = (
+            live_closed_position_history
+            if live_closed_position_history is not None
+            else ClosedPositionHistory()
+            if execution_mode is ExecutionMode.LIVE
+            else None
+        )
         self.live_position_store = live_position_store
         self.live_position_recovery_coordinator = (
             PositionRecoveryCoordinator(live_position_manager)
@@ -641,7 +656,8 @@ class MarketData:
             )
         )
         self.live_execution_context = None
-        self.latest_closed_position = closed_position
+        self.live_closed_position_history.record(closed_position)
+        self.latest_closed_position = self.live_closed_position_history.positions[-1]
         self._validate_live_position_context_consistency()
         self._persist_live_position_state()
         return closed_position

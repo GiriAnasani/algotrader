@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from trading.broker_position_reconciler import BrokerPositionReconciler
+from trading.closed_position_history import ClosedPositionHistory
 from trading.live_execution import LiveExecutionCoordinator
 from trading.live_readiness import LiveReadinessGate
 from trading.live_recovery import LiveRecoveryCoordinator
@@ -31,6 +32,7 @@ class LiveRuntimeComponents:
     execution_coordinator: LiveExecutionCoordinator
     position_reconciler: BrokerPositionReconciler
     position_manager: PositionManager
+    closed_position_history: ClosedPositionHistory
     position_store: PositionStore | None
 
 
@@ -45,6 +47,7 @@ def build_live_runtime(kite_client, execution_enabled=False, position_store=None
 
     readiness_gate = LiveReadinessGate()
     position_manager = PositionManager()
+    closed_position_history = ClosedPositionHistory()
     position_reader = ZerodhaPositionReader(kite_client)
     order_list_reader = ZerodhaOrderListReader(kite_client)
     position_reconciler = BrokerPositionReconciler()
@@ -78,5 +81,6 @@ def build_live_runtime(kite_client, execution_enabled=False, position_store=None
         execution_coordinator=execution_coordinator,
         position_reconciler=position_reconciler,
         position_manager=position_manager,
+        closed_position_history=closed_position_history,
         position_store=position_store,
     )

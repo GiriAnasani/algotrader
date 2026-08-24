@@ -9,6 +9,7 @@ from trading.close_position_lifecycle import (
     ConfirmedPositionExit,
     ClosedPosition,
 )
+from trading.closed_position_history import ClosedPositionHistory
 from trading.execution_mode import ExecutionMode
 from trading.live_restart_orchestration import LiveRestartOrchestrator
 from trading.live_startup import initialize_live_session
@@ -74,6 +75,11 @@ def market(mode=ExecutionMode.LIVE, manager=None, latest=None):
     value.execution_router = Router(mode)
     value.live_position_manager = manager or PositionManager()
     value.latest_closed_position = latest
+    value.live_closed_position_history = (
+        ClosedPositionHistory() if mode is ExecutionMode.LIVE else None
+    )
+    if latest is not None:
+        value.live_closed_position_history.record(latest)
     value.paper_trade_ledger = object()
     return value
 
@@ -234,6 +240,7 @@ def test_confirmed_exit_exposes_only_exact_latest_owned_position():
     exit_fill = ConfirmedPositionExit(PositionSide.CE, "NIFTY26AUG25000CE", 65,
                                       105, NOW + timedelta(minutes=5))
     latest = ClosePositionLifecycle(manager).close(exit_fill)
+    runtime_market.live_closed_position_history.record(latest)
     runtime_market.latest_closed_position = latest
     view = RuntimePnLStateAdapter(runtime_market).view()
     result = service(runtime_market).snapshot(DAY)
@@ -262,6 +269,7 @@ def test_reversal_views_authoritative_flat_then_exact_opposite_open():
     exit_fill = ConfirmedPositionExit(PositionSide.CE, "NIFTY26AUG25000CE", 65,
                                       105, NOW + timedelta(minutes=5))
     latest = ClosePositionLifecycle(manager).close(exit_fill)
+    runtime_market.live_closed_position_history.record(latest)
     runtime_market.latest_closed_position = latest
     between = RuntimePnLStateAdapter(runtime_market).view()
     assert between.active_position is None

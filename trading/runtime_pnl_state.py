@@ -40,12 +40,11 @@ class RuntimePnLStateView:
 
 
 class RuntimePnLStateAdapter:
-    """Read LIVE state without creating ownership or claiming complete history.
+    """Read process-lifetime LIVE history and active state without copying.
 
-    LIVE currently owns only ``latest_closed_position`` rather than a complete
-    closed-position ledger, so the returned tuple contains at most that object.
-    PAPER is explicit unsupported because its PaperTrade ledger is not the
-    ClosedPosition domain required by the Phase 9 calculation stack.
+    Closed history is complete only for the current process in Phase 9.12;
+    restart does not reconstruct trades closed by a prior process. PAPER is
+    explicitly unsupported because PaperTrade is not ClosedPosition.
     """
 
     def __init__(self, market):
@@ -58,10 +57,8 @@ class RuntimePnLStateAdapter:
             raise PaperRuntimePnLStateUnsupportedError(
                 "PAPER history cannot be represented as ClosedPosition values."
             )
-        latest = self._market.latest_closed_position
-        closed_positions = () if latest is None else (latest,)
         return RuntimePnLStateView(
-            closed_positions=closed_positions,
+            closed_positions=self._market.live_closed_position_history.positions,
             active_position=self._market.live_position_manager.active_position,
         )
 
