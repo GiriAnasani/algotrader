@@ -2,6 +2,7 @@
 
 from enum import Enum
 
+from trading.position_continuity import PositionContinuityResult
 from trading.live_recovery import LiveRecoveryResult, LiveRecoveryState
 
 
@@ -18,6 +19,7 @@ class LiveReadinessGate:
     def __init__(self):
         self._state = LiveReadinessState.NOT_READY
         self._last_recovery_result = None
+        self._last_continuity_result = None
 
     @property
     def state(self):
@@ -31,6 +33,10 @@ class LiveReadinessGate:
     def last_recovery_result(self):
         return self._last_recovery_result
 
+    @property
+    def last_continuity_result(self):
+        return self._last_continuity_result
+
     def apply_recovery_result(self, recovery_result):
         """Replace readiness according to one explicitly supplied result."""
         if not isinstance(recovery_result, LiveRecoveryResult):
@@ -41,6 +47,14 @@ class LiveReadinessGate:
             self._state = LiveReadinessState.READY
         else:
             self._state = LiveReadinessState.NOT_READY
+
+    def apply_continuity_result(self, continuity_result):
+        """Establish readiness from one explicitly verified continuity result."""
+        if not isinstance(continuity_result, PositionContinuityResult):
+            raise TypeError("Continuity result must be a PositionContinuityResult.")
+
+        self._last_continuity_result = continuity_result
+        self._state = LiveReadinessState.READY
 
     def revoke(self):
         """Fail closed while retaining the last result for diagnostics."""
