@@ -9,6 +9,7 @@ from kiteconnect import KiteTicker
 from core.config import (
     KITE_API_KEY
 )
+from core.production_audit import AuditEvent, AuditEventType, AuditSink
 
 from trading.ohlc import (
     OHLCBuilder,
@@ -19,7 +20,7 @@ from trading.historical import historical_row_to_candle
 from trading.candle import Candle
 from trading.execution_mode import ExecutionMode
 from trading.execution_router import ExecutionRouter
-from trading.live_execution import LiveExecutionCoordinator
+from trading.live_execution import LiveExecutionCoordinator, live_order_correlation_id
 from trading.live_readiness import LiveReadinessGate
 from trading.market_data_health import (
     MarketDataHealthState,
@@ -120,6 +121,7 @@ class MarketData:
         live_market_data_clock=None,
         live_risk_evaluator=None,
         live_risk_guard=None,
+        live_audit_sink=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -215,6 +217,8 @@ class MarketData:
             raise TypeError("Live risk guard must be a LiveRiskGuard or None.")
         if (live_risk_evaluator is None) is not (live_risk_guard is None):
             raise ValueError("Live risk evaluator and guard must be supplied together.")
+        if live_audit_sink is not None and not isinstance(live_audit_sink, AuditSink):
+            raise TypeError("Live audit sink must be an AuditSink or None.")
 
         self.kite = kite
 
@@ -252,6 +256,7 @@ class MarketData:
         self.live_market_data_health_tracker = live_market_data_health_tracker
         self.live_risk_evaluator = live_risk_evaluator
         self.live_risk_guard = live_risk_guard
+        self.live_audit_sink = live_audit_sink
         self._live_market_data_clock = (
             live_market_data_clock
             if live_market_data_clock is not None
@@ -511,6 +516,14 @@ class MarketData:
             )
 
             if isinstance(execution_result, LiveOrderIntent):
+                correlation_id = live_order_correlation_id(execution_result)
+                self._write_live_audit(
+                    AuditEventType.ORDER_INTENT_CREATED,
+                    execution_time,
+                    {"action": action, "symbol": contract_symbol,
+                     "quantity": quantity},
+                    correlation_id,
+                )
                 self.live_execution_coordinator.preflight(
                     execution_result, observed_at
                 )
@@ -519,6 +532,18 @@ class MarketData:
                         action,
                         quantity,
                         execution_time.astimezone(EXCHANGE_TIMEZONE).date(),
+                    )
+                    self._write_live_audit(
+                        AuditEventType.RISK_ALLOWED if decision.allowed
+                        else AuditEventType.RISK_REJECTED,
+                        execution_time,
+                        {"action": action, "quantity": quantity,
+                         "trading_date": execution_time.date(),
+                         "allowed": decision.allowed,
+                         "reason": decision.reason,
+                         "completed_trade_count": decision.completed_trade_count,
+                         "realized_net_pnl": decision.realized_net_pnl},
+                        correlation_id,
                     )
                     self.live_risk_guard.validate(decision)
 
@@ -545,7 +570,6 @@ class MarketData:
                 except Exception:
                     self.live_readiness_gate.revoke()
                     raise
-
                 is_pending = self._apply_live_order_status(
                     order_id,
                     execution_result,
@@ -553,6 +577,19 @@ class MarketData:
                 )
                 if is_pending:
                     self.live_readiness_gate.revoke()
+                self._write_live_audit(
+                    AuditEventType.ORDER_STATUS_RECEIVED,
+                    observed_at or execution_time,
+                    {"order_id": order_id, "state": broker_status.state},
+                    live_order_correlation_id(execution_result),
+                )
+                if is_pending:
+                    self._write_live_audit(
+                        AuditEventType.ORDER_PENDING,
+                        observed_at or execution_time,
+                        {"order_id": order_id, "action": action},
+                        live_order_correlation_id(execution_result),
+                    )
 
                 execution_results.append(order_id)
                 print(
@@ -777,6 +814,15 @@ class MarketData:
             )
             self._validate_live_position_context_consistency()
             self._persist_live_position_state()
+            self._write_live_audit(
+                AuditEventType.POSITION_OPENED,
+                broker_status.fill_timestamp,
+                {"side": side, "symbol": managed_position.contract_symbol,
+                 "quantity": managed_position.quantity,
+                 "fill_price": managed_position.entry_price,
+                 "fill_time": managed_position.entry_time},
+                live_order_correlation_id(order),
+            )
             return managed_position
 
         closed_position = self.live_close_position_lifecycle.close(
@@ -794,7 +840,24 @@ class MarketData:
         self._validate_live_position_context_consistency()
         self._persist_live_closed_position_history()
         self._persist_live_position_state()
+        self._write_live_audit(
+            AuditEventType.POSITION_CLOSED,
+            broker_status.fill_timestamp,
+            {"side": side, "symbol": closed_position.contract_symbol,
+             "quantity": closed_position.quantity,
+             "entry_price": closed_position.entry_price,
+             "exit_price": closed_position.exit_price,
+             "exit_time": closed_position.exit_time},
+            live_order_correlation_id(order),
+        )
         return closed_position
+
+    def _write_live_audit(self, event_type, occurred_at, data,
+                          correlation_id=None):
+        if self.live_audit_sink is not None:
+            self.live_audit_sink.write(
+                AuditEvent.create(event_type, occurred_at, data, correlation_id)
+            )
 
     def _persist_live_position_state(self):
         """Persist exact confirmed manager truth when a store is configured."""

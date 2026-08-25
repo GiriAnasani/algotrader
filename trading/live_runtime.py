@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from core.production_audit import AuditSink
 from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.closed_position_history import ClosedPositionHistory
 from trading.closed_position_history_store import ClosedPositionHistoryStore
@@ -44,6 +45,7 @@ class LiveRuntimeComponents:
     execution_guard: LiveExecutionGuard
     risk_evaluator: LiveRiskEvaluator | None
     risk_guard: LiveRiskGuard | None
+    audit_sink: AuditSink | None
 
 
 def build_live_runtime(
@@ -53,6 +55,7 @@ def build_live_runtime(
     closed_position_history_store=None,
     risk_limits=None,
     risk_session_net_pnl_aggregator=None,
+    audit_sink=None,
 ):
     """Builds guarded LIVE dependencies without broker or recovery activity."""
     if kite_client is None:
@@ -81,6 +84,8 @@ def build_live_runtime(
             "Risk limits and a risk session net P&L aggregator must be "
             "supplied together."
         )
+    if audit_sink is not None and not isinstance(audit_sink, AuditSink):
+        raise TypeError("Audit sink must be an AuditSink or None.")
 
     readiness_gate = LiveReadinessGate()
     position_manager = PositionManager()
@@ -117,6 +122,7 @@ def build_live_runtime(
         order_submitter,
         enabled=execution_enabled,
         execution_guard=execution_guard,
+        audit_sink=audit_sink,
     )
 
     return LiveRuntimeComponents(
@@ -138,4 +144,5 @@ def build_live_runtime(
         execution_guard=execution_guard,
         risk_evaluator=risk_evaluator,
         risk_guard=risk_guard,
+        audit_sink=audit_sink,
     )

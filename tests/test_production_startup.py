@@ -196,6 +196,8 @@ def test_live_build_propagates_only_configured_enablement_without_activity(
     assert result.runtime.risk_evaluator.limits is not None
     assert result.market.live_risk_evaluator is result.runtime.risk_evaluator
     assert result.market.live_risk_guard is result.runtime.risk_guard
+    assert result.market.live_audit_sink is result.runtime.audit_sink
+    assert result.runtime.audit_sink.path == config.log_directory / "audit.jsonl"
     assert result.market.kite is client
     assert result.market.instruments is instruments
     assert result.runtime.readiness_gate.state is LiveReadinessState.NOT_READY

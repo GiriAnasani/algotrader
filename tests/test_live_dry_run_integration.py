@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+from core.production_audit import AuditEventType, AuditSink, AuditWriteError
 from trading.candle import Candle
 from trading.execution_mode import ExecutionMode
 from trading.live_execution import (
@@ -35,6 +36,18 @@ from trading.zerodha_position_reader import ZerodhaPositionReader
 
 IST = ZoneInfo("Asia/Kolkata")
 TIME = datetime(2026, 8, 21, 9, 15, tzinfo=IST)
+
+
+class SelectiveAuditSink(AuditSink):
+    def __init__(self, fail_on=None):
+        self.fail_on = fail_on
+        self.events = []
+
+    def write(self, event):
+        self.events.append(event)
+        if event.event_type is self.fail_on:
+            raise AuditWriteError("audit failed")
+        return event
 
 
 class FakeKiteClient:
@@ -1674,3 +1687,55 @@ def test_market_data_can_revoke_but_cannot_apply_recovery_results():
 
     assert ".revoke()" in source
     assert "apply_recovery_result" not in source
+
+
+def test_full_buy_state_is_committed_before_position_audit_failure():
+    market, client = make_market()
+    sink = SelectiveAuditSink(AuditEventType.POSITION_OPENED)
+    market.live_audit_sink = sink
+    set_strategy_position(market, "CE", 27.0)
+
+    with pytest.raises(AuditWriteError):
+        market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+
+    assert len(client.calls) == 1
+    assert market.live_position_manager.active_position is not None
+    assert market.live_execution_context.contract_symbol == (
+        market.live_position_manager.active_position.contract_symbol
+    )
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
+    correlations = {
+        item.correlation_id for item in sink.events
+        if item.event_type in (
+            AuditEventType.ORDER_INTENT_CREATED,
+            AuditEventType.ORDER_STATUS_RECEIVED,
+            AuditEventType.POSITION_OPENED,
+        )
+    }
+    assert len(correlations) == 1
+
+
+def test_pending_state_and_revocation_precede_pending_audit_failure():
+    market, client = make_market(status_records=[{
+        "status": "OPEN", "filled_quantity": 0,
+        "pending_quantity": 75, "average_price": 0.0,
+    }])
+    sink = SelectiveAuditSink(AuditEventType.ORDER_PENDING)
+    market.live_audit_sink = sink
+    set_strategy_position(market, "CE", 27.0)
+
+    with pytest.raises(AuditWriteError):
+        market._execute_strategy_result(result(SignalAction.BUY_CE), TIME)
+
+    assert len(client.calls) == 1
+    assert market.pending_live_order is not None
+    assert market.live_readiness_gate.state is LiveReadinessState.NOT_READY
+    status = next(
+        item for item in sink.events
+        if item.event_type is AuditEventType.ORDER_STATUS_RECEIVED
+    )
+    pending = next(
+        item for item in sink.events
+        if item.event_type is AuditEventType.ORDER_PENDING
+    )
+    assert status.correlation_id == pending.correlation_id

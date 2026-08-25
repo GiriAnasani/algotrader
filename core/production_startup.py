@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from core.production_config import ProductionConfig
+from core.production_audit import JsonLineAuditSink
 from trading.closed_position_history_store import ClosedPositionHistoryStore
 from trading.execution_mode import ExecutionMode
 from trading.live_market_factory import build_live_market_data
@@ -114,6 +115,7 @@ class ProductionStartupBuilder:
         history_store = ClosedPositionHistoryStore(
             self._config.closed_position_history_store_path
         )
+        audit_sink = JsonLineAuditSink(self._config.log_directory / "audit.jsonl")
         runtime = build_live_runtime(
             kite_client,
             execution_enabled=self._config.execution_enabled,
@@ -123,6 +125,7 @@ class ProductionStartupBuilder:
             risk_session_net_pnl_aggregator=(
                 self._risk_session_net_pnl_aggregator
             ),
+            audit_sink=audit_sink,
         )
         market = build_live_market_data(kite_client, instruments, runtime)
         return ProductionStartupComponents(self._config, runtime, market)

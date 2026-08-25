@@ -34,4 +34,5 @@ def build_live_market_data(kite, instruments, runtime_components):
         ),
         live_risk_evaluator=runtime_components.risk_evaluator,
         live_risk_guard=runtime_components.risk_guard,
+        live_audit_sink=runtime_components.audit_sink,
     )

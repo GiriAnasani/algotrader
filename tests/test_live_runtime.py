@@ -81,6 +81,7 @@ EXPECTED_TYPES = {
     "execution_guard": LiveExecutionGuard,
     "risk_evaluator": type(None),
     "risk_guard": type(None),
+    "audit_sink": type(None),
 }
 
 

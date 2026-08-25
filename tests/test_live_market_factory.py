@@ -88,6 +88,7 @@ def test_factory_builds_one_live_market_with_exact_runtime_dependencies(
     assert market.live_market_data_health_tracker is runtime.market_data_health_tracker
     assert market.live_risk_evaluator is runtime.risk_evaluator
     assert market.live_risk_guard is runtime.risk_guard
+    assert market.live_audit_sink is runtime.audit_sink
     assert runtime.execution_coordinator.enabled is execution_enabled
     assert gate.state is LiveReadinessState.NOT_READY
     assert gate.is_ready is False
