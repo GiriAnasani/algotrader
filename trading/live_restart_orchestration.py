@@ -27,6 +27,7 @@ from trading.position_restorer import (
     PositionRestorer,
 )
 from trading.position_store import PositionStore
+from trading.market import LiveExecutionContext
 
 
 class LiveRestartOrchestrationError(RuntimeError):
@@ -232,6 +233,12 @@ class LiveRestartOrchestrator:
             restoration = None
             try:
                 restoration = PositionRestorer(manager).restore(restart)
+                restored = restoration.restored_position
+                startup_result.market.live_execution_context = LiveExecutionContext(
+                    restored.side.value,
+                    restored.contract_symbol,
+                    restored.quantity,
+                )
                 self._restore_closed_history(
                     runtime, startup_result, history_store
                 )
