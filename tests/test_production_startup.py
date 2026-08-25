@@ -12,6 +12,14 @@ from core.production_startup import (
 from trading.execution_mode import ExecutionMode
 from trading.live_readiness import LiveReadinessState
 from trading.market import MarketData
+from trading.live_risk import LiveRiskLimits
+from trading.option_charges import (
+    NetPnLCalculator,
+    OptionTradeChargesCalculator,
+    ZERODHA_NSE_OPTIONS_2026,
+)
+from trading.realized_net_pnl import RealizedNetPnLAggregator
+from trading.session_net_pnl import SessionNetPnLAggregator
 
 
 class FakeKiteClient:
@@ -57,6 +65,24 @@ def make_config(tmp_path, environment=DeploymentEnvironment.LOCAL,
         log_directory=tmp_path / "logs",
         strategy_target_points=target,
     )
+
+
+def risk_limits():
+    return LiveRiskLimits(1, 65, 10, 1000.0)
+
+
+def risk_pnl():
+    return SessionNetPnLAggregator(
+        RealizedNetPnLAggregator(
+            NetPnLCalculator(
+                OptionTradeChargesCalculator(ZERODHA_NSE_OPTIONS_2026)
+            )
+        )
+    )
+
+
+def builder(config):
+    return ProductionStartupBuilder(config, risk_limits(), risk_pnl())
 
 
 def assert_no_calls(client):
@@ -125,7 +151,21 @@ def test_live_requires_explicit_inputs(tmp_path, missing):
     arguments = {"kite_client": FakeKiteClient(), "instruments": object()}
     arguments[missing] = None
     with pytest.raises(ValueError, match="LIVE startup requires"):
-        ProductionStartupBuilder(config).build(**arguments)
+        builder(config).build(**arguments)
+
+
+def test_live_requires_explicit_risk_limits(tmp_path):
+    config = make_config(tmp_path, mode=ExecutionMode.LIVE)
+    with pytest.raises(ValueError, match="explicit live risk limits"):
+        ProductionStartupBuilder(config).build(FakeKiteClient(), object())
+
+
+def test_live_requires_explicit_risk_pnl_dependency(tmp_path):
+    config = make_config(tmp_path, mode=ExecutionMode.LIVE)
+    with pytest.raises(ValueError, match="risk session net P&L aggregator"):
+        ProductionStartupBuilder(config, risk_limits()).build(
+            FakeKiteClient(), object()
+        )
 
 
 @pytest.mark.parametrize(
@@ -148,11 +188,14 @@ def test_live_build_propagates_only_configured_enablement_without_activity(
     )
     client = FakeKiteClient()
     instruments = object()
-    result = ProductionStartupBuilder(config).build(client, instruments)
+    result = builder(config).build(client, instruments)
     assert result.config is config
     assert result.execution_mode is ExecutionMode.LIVE
     assert result.execution_enabled is enabled
     assert result.runtime.execution_coordinator.enabled is enabled
+    assert result.runtime.risk_evaluator.limits is not None
+    assert result.market.live_risk_evaluator is result.runtime.risk_evaluator
+    assert result.market.live_risk_guard is result.runtime.risk_guard
     assert result.market.kite is client
     assert result.market.instruments is instruments
     assert result.runtime.readiness_gate.state is LiveReadinessState.NOT_READY
@@ -162,7 +205,7 @@ def test_live_build_propagates_only_configured_enablement_without_activity(
 
 def test_live_uses_exact_configured_stores_and_shared_runtime_authorities(tmp_path):
     config = make_config(tmp_path, mode=ExecutionMode.LIVE)
-    result = ProductionStartupBuilder(config).build(FakeKiteClient(), object())
+    result = builder(config).build(FakeKiteClient(), object())
     runtime = result.runtime
     market = result.market
     assert result.position_store is runtime.position_store
@@ -181,7 +224,7 @@ def test_live_uses_exact_configured_stores_and_shared_runtime_authorities(tmp_pa
 def test_construction_creates_no_configured_files_or_directories(tmp_path, mode):
     config = make_config(tmp_path, mode=mode)
     arguments = () if mode is ExecutionMode.PAPER else (FakeKiteClient(), object())
-    ProductionStartupBuilder(config).build(*arguments)
+    (ProductionStartupBuilder(config) if mode is ExecutionMode.PAPER else builder(config)).build(*arguments)
     assert not config.position_store_path.exists()
     assert not config.closed_position_history_store_path.exists()
     assert not config.log_directory.exists()

@@ -8,6 +8,8 @@ from trading.execution_mode import ExecutionMode
 from trading.live_market_factory import build_live_market_data
 from trading.live_runtime import LiveRuntimeComponents, build_live_runtime
 from trading.market import MarketData
+from trading.live_risk import LiveRiskLimits
+from trading.session_net_pnl import SessionNetPnLAggregator
 from trading.position_store import PositionStore
 
 
@@ -54,10 +56,33 @@ class ProductionStartupComponents:
 class ProductionStartupBuilder:
     """Builds a safe runtime graph without starting runtime activity."""
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        live_risk_limits=None,
+        risk_session_net_pnl_aggregator=None,
+    ):
         if not isinstance(config, ProductionConfig):
             raise TypeError("Config must be a ProductionConfig.")
         self._config = config
+        if live_risk_limits is not None and not isinstance(
+            live_risk_limits, LiveRiskLimits
+        ):
+            raise TypeError("Live risk limits must be LiveRiskLimits or None.")
+        self._live_risk_limits = live_risk_limits
+        if (
+            risk_session_net_pnl_aggregator is not None
+            and not isinstance(
+                risk_session_net_pnl_aggregator, SessionNetPnLAggregator
+            )
+        ):
+            raise TypeError(
+                "Risk session net P&L aggregator must be a "
+                "SessionNetPnLAggregator or None."
+            )
+        self._risk_session_net_pnl_aggregator = (
+            risk_session_net_pnl_aggregator
+        )
 
     @property
     def config(self):
@@ -77,6 +102,13 @@ class ProductionStartupBuilder:
             raise ValueError("LIVE startup requires a caller-supplied kite client.")
         if instruments is None:
             raise ValueError("LIVE startup requires instruments.")
+        if self._live_risk_limits is None:
+            raise ValueError("LIVE startup requires explicit live risk limits.")
+        if self._risk_session_net_pnl_aggregator is None:
+            raise ValueError(
+                "LIVE startup requires an explicit risk session net P&L "
+                "aggregator."
+            )
 
         position_store = PositionStore(self._config.position_store_path)
         history_store = ClosedPositionHistoryStore(
@@ -87,6 +119,10 @@ class ProductionStartupBuilder:
             execution_enabled=self._config.execution_enabled,
             position_store=position_store,
             closed_position_history_store=history_store,
+            risk_limits=self._live_risk_limits,
+            risk_session_net_pnl_aggregator=(
+                self._risk_session_net_pnl_aggregator
+            ),
         )
         market = build_live_market_data(kite_client, instruments, runtime)
         return ProductionStartupComponents(self._config, runtime, market)

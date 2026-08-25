@@ -13,6 +13,14 @@ from trading.live_readiness import LiveReadinessGate, LiveReadinessState
 from trading.live_recovery import LiveRecoveryCoordinator
 from trading.live_runtime import LiveRuntimeComponents, build_live_runtime
 from trading.live_session_bootstrap import LiveSessionBootstrap
+from trading.live_risk import LiveRiskLimits
+from trading.option_charges import (
+    NetPnLCalculator,
+    OptionChargeSchedule,
+    OptionTradeChargesCalculator,
+)
+from trading.realized_net_pnl import RealizedNetPnLAggregator
+from trading.session_net_pnl import SessionNetPnLAggregator
 from trading.position_manager import PositionManager
 from trading.position_store import PositionStore
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
@@ -71,6 +79,8 @@ EXPECTED_TYPES = {
     "position_store": type(None),
     "market_data_health_tracker": MarketDataHealthTracker,
     "execution_guard": LiveExecutionGuard,
+    "risk_evaluator": type(None),
+    "risk_guard": type(None),
 }
 
 
@@ -81,6 +91,32 @@ def assert_no_broker_calls(client):
     assert client.place_order_calls == 0
     assert client.cancel_order_calls == 0
     assert client.modify_order_calls == 0
+
+
+def risk_pnl():
+    return SessionNetPnLAggregator(
+        RealizedNetPnLAggregator(
+            NetPnLCalculator(
+                OptionTradeChargesCalculator(
+                    OptionChargeSchedule(0, 0, 0, 0, 0, 0)
+                )
+            )
+        )
+    )
+
+
+def test_risk_requires_and_retains_exact_explicit_pnl_dependency():
+    limits = LiveRiskLimits(1, 65, 2, 1000)
+    aggregate = risk_pnl()
+    components = build_live_runtime(
+        FakeKiteClient(),
+        risk_limits=limits,
+        risk_session_net_pnl_aggregator=aggregate,
+    )
+    assert components.risk_evaluator.limits is limits
+    assert components.risk_evaluator.session_net_pnl_aggregator is aggregate
+    with pytest.raises(ValueError, match="supplied together"):
+        build_live_runtime(FakeKiteClient(), risk_limits=limits)
 
 
 def test_bundle_is_immutable_and_exposes_expected_component_types():

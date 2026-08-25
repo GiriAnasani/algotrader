@@ -26,6 +26,7 @@ from trading.market_data_health import (
     MarketDataHealthTracker,
 )
 from trading.live_order import LiveOrderIntent
+from trading.live_risk import LiveRiskEvaluator, LiveRiskGuard
 from trading.broker_order_status import BrokerOrderState
 from trading.broker_position_reconciler import (
     BrokerPositionReconciler,
@@ -117,6 +118,8 @@ class MarketData:
         live_position_store=None,
         live_market_data_health_tracker=None,
         live_market_data_clock=None,
+        live_risk_evaluator=None,
+        live_risk_guard=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -202,6 +205,16 @@ class MarketData:
             live_market_data_clock
         ):
             raise TypeError("Live market-data clock must be callable or None.")
+        if live_risk_evaluator is not None and not isinstance(
+            live_risk_evaluator, LiveRiskEvaluator
+        ):
+            raise TypeError("Live risk evaluator must be a LiveRiskEvaluator or None.")
+        if live_risk_guard is not None and not isinstance(
+            live_risk_guard, LiveRiskGuard
+        ):
+            raise TypeError("Live risk guard must be a LiveRiskGuard or None.")
+        if (live_risk_evaluator is None) is not (live_risk_guard is None):
+            raise ValueError("Live risk evaluator and guard must be supplied together.")
 
         self.kite = kite
 
@@ -237,6 +250,8 @@ class MarketData:
         self.live_closed_position_history_store = live_closed_position_history_store
         self.live_position_store = live_position_store
         self.live_market_data_health_tracker = live_market_data_health_tracker
+        self.live_risk_evaluator = live_risk_evaluator
+        self.live_risk_guard = live_risk_guard
         self._live_market_data_clock = (
             live_market_data_clock
             if live_market_data_clock is not None
@@ -499,6 +514,13 @@ class MarketData:
                 self.live_execution_coordinator.preflight(
                     execution_result, observed_at
                 )
+                if self.live_risk_evaluator is not None:
+                    decision = self.live_risk_evaluator.evaluate(
+                        action,
+                        quantity,
+                        execution_time.astimezone(EXCHANGE_TIMEZONE).date(),
+                    )
+                    self.live_risk_guard.validate(decision)
 
             if self.execution_router.mode is ExecutionMode.LIVE:
                 broker_positions = self._validate_live_broker_position_before_action()

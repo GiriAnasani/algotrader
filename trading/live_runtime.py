@@ -9,10 +9,12 @@ from trading.live_execution import LiveExecutionCoordinator
 from trading.execution_guard import LiveExecutionGuard
 from trading.market_data_health import MarketDataHealthTracker
 from trading.live_readiness import LiveReadinessGate
+from trading.live_risk import LiveRiskEvaluator, LiveRiskGuard, LiveRiskLimits
 from trading.live_recovery import LiveRecoveryCoordinator
 from trading.live_session_bootstrap import LiveSessionBootstrap
 from trading.position_manager import PositionManager
 from trading.position_store import PositionStore
+from trading.session_net_pnl import SessionNetPnLAggregator
 from trading.zerodha_order_adapter import ZerodhaOrderAdapter
 from trading.zerodha_order_list_reader import ZerodhaOrderListReader
 from trading.zerodha_order_status_reader import ZerodhaOrderStatusReader
@@ -40,6 +42,8 @@ class LiveRuntimeComponents:
     position_store: PositionStore | None
     market_data_health_tracker: MarketDataHealthTracker
     execution_guard: LiveExecutionGuard
+    risk_evaluator: LiveRiskEvaluator | None
+    risk_guard: LiveRiskGuard | None
 
 
 def build_live_runtime(
@@ -47,6 +51,8 @@ def build_live_runtime(
     execution_enabled=False,
     position_store=None,
     closed_position_history_store=None,
+    risk_limits=None,
+    risk_session_net_pnl_aggregator=None,
 ):
     """Builds guarded LIVE dependencies without broker or recovery activity."""
     if kite_client is None:
@@ -61,12 +67,36 @@ def build_live_runtime(
         raise TypeError(
             "Closed-position history store must be a ClosedPositionHistoryStore or None."
         )
+    if risk_limits is not None and not isinstance(risk_limits, LiveRiskLimits):
+        raise TypeError("Risk limits must be LiveRiskLimits or None.")
+    if risk_session_net_pnl_aggregator is not None and not isinstance(
+        risk_session_net_pnl_aggregator, SessionNetPnLAggregator
+    ):
+        raise TypeError(
+            "Risk session net P&L aggregator must be a "
+            "SessionNetPnLAggregator or None."
+        )
+    if (risk_limits is None) is not (risk_session_net_pnl_aggregator is None):
+        raise ValueError(
+            "Risk limits and a risk session net P&L aggregator must be "
+            "supplied together."
+        )
 
     readiness_gate = LiveReadinessGate()
     position_manager = PositionManager()
     closed_position_history = ClosedPositionHistory()
     market_data_health_tracker = MarketDataHealthTracker()
     execution_guard = LiveExecutionGuard()
+    risk_evaluator = None
+    risk_guard = None
+    if risk_limits is not None:
+        risk_evaluator = LiveRiskEvaluator(
+            risk_limits,
+            position_manager,
+            closed_position_history,
+            risk_session_net_pnl_aggregator,
+        )
+        risk_guard = LiveRiskGuard()
     position_reader = ZerodhaPositionReader(kite_client)
     order_list_reader = ZerodhaOrderListReader(kite_client)
     position_reconciler = BrokerPositionReconciler()
@@ -106,4 +136,6 @@ def build_live_runtime(
         position_store=position_store,
         market_data_health_tracker=market_data_health_tracker,
         execution_guard=execution_guard,
+        risk_evaluator=risk_evaluator,
+        risk_guard=risk_guard,
     )

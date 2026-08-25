@@ -32,4 +32,6 @@ def build_live_market_data(kite, instruments, runtime_components):
         live_market_data_health_tracker=(
             runtime_components.market_data_health_tracker
         ),
+        live_risk_evaluator=runtime_components.risk_evaluator,
+        live_risk_guard=runtime_components.risk_guard,
     )
