@@ -7,6 +7,7 @@ from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.closed_position_history import ClosedPositionHistory
 from trading.closed_position_history_store import ClosedPositionHistoryStore
 from trading.live_execution import LiveExecutionCoordinator
+from trading.execution_guard import LiveExecutionGuard
 from trading.market_data_health import MarketDataHealthTracker
 from trading.live_readiness import LiveReadinessGate, LiveReadinessState
 from trading.live_recovery import LiveRecoveryCoordinator
@@ -69,6 +70,7 @@ EXPECTED_TYPES = {
     "closed_position_history_store": type(None),
     "position_store": type(None),
     "market_data_health_tracker": MarketDataHealthTracker,
+    "execution_guard": LiveExecutionGuard,
 }
 
 
@@ -158,6 +160,7 @@ def test_internal_dependency_graph_uses_exposed_exact_instances():
     assert components.session_bootstrap._readiness_gate is components.readiness_gate
     assert components.execution_coordinator._adapter is components.order_adapter
     assert components.execution_coordinator._submitter is components.order_submitter
+    assert components.execution_coordinator._execution_guard is components.execution_guard
 
 
 def test_composition_is_construction_only_with_no_runtime_boundaries():

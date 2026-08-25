@@ -416,6 +416,7 @@ class MarketData:
                 SignalAction.EXIT_CE,
             ) else "PE"
             premium = self.latest_option_premiums.get(side)
+            observed_at = None
 
             if (
                 self.execution_router.mode is ExecutionMode.LIVE
@@ -443,7 +444,6 @@ class MarketData:
                         side, observed_at
                     )
                 self._validate_live_position_context_consistency()
-                broker_positions = self._validate_live_broker_position_before_action()
 
             if action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
                 if self.nifty_option_pair is None:
@@ -456,6 +456,9 @@ class MarketData:
                 if self.execution_router.mode is ExecutionMode.LIVE:
                     active_context = self.live_execution_context
                     if active_context is None:
+                        broker_positions = (
+                            self._validate_live_broker_position_before_action()
+                        )
                         self._validate_live_position_safety_before_action(
                             action,
                             None,
@@ -483,14 +486,6 @@ class MarketData:
             else:
                 raise ValueError("Unsupported strategy action for execution.")
 
-            if self.execution_router.mode is ExecutionMode.LIVE:
-                self._validate_live_position_safety_before_action(
-                    action,
-                    contract_symbol,
-                    quantity,
-                    broker_positions,
-                )
-
             execution_result = self.execution_router.route(
                 action,
                 contract_symbol=contract_symbol,
@@ -501,9 +496,23 @@ class MarketData:
             )
 
             if isinstance(execution_result, LiveOrderIntent):
+                self.live_execution_coordinator.preflight(
+                    execution_result, observed_at
+                )
+
+            if self.execution_router.mode is ExecutionMode.LIVE:
+                broker_positions = self._validate_live_broker_position_before_action()
+                self._validate_live_position_safety_before_action(
+                    action,
+                    contract_symbol,
+                    quantity,
+                    broker_positions,
+                )
+
+            if isinstance(execution_result, LiveOrderIntent):
                 try:
                     order_id = self.live_execution_coordinator.execute(
-                        execution_result
+                        execution_result, observed_at
                     )
                 except Exception:
                     self.live_readiness_gate.revoke()

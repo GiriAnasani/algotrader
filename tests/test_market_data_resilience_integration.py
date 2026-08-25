@@ -6,8 +6,14 @@ import pytest
 import trading.market as market_module
 from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.execution_mode import ExecutionMode
+from trading.execution_guard import (
+    LiveExecutionGuard,
+    LiveOrderRateLimitError,
+    StaleLiveOrderIntentError,
+)
 from trading.live_execution import LiveExecutionCoordinator, LiveExecutionDisabledError
 from trading.live_readiness import LiveReadinessGate
+from trading.live_order import LiveOrderIntent
 from trading.live_recovery import LiveRecoveryResult, LiveRecoveryState
 from trading.live_runtime import build_live_runtime
 from trading.market import LiveMarketDataHealthError, MarketData
@@ -69,7 +75,7 @@ def ready_gate():
     return gate
 
 
-def live_market(enabled=True, tracker=None):
+def live_market(enabled=True, tracker=None, execution_guard=None):
     client = FakeClient()
     tracker = tracker or MarketDataHealthTracker()
     manager = PositionManager()
@@ -78,7 +84,8 @@ def live_market(enabled=True, tracker=None):
         None,
         execution_mode=ExecutionMode.LIVE,
         live_execution_coordinator=LiveExecutionCoordinator(
-            ZerodhaOrderAdapter(), ZerodhaOrderSubmitter(client), enabled=enabled
+            ZerodhaOrderAdapter(), ZerodhaOrderSubmitter(client), enabled=enabled,
+            execution_guard=execution_guard,
         ),
         live_order_status_reader=ZerodhaOrderStatusReader(client),
         live_position_reader=ZerodhaPositionReader(client),
@@ -353,3 +360,33 @@ def test_paper_remains_default_without_health_requirement():
     market = MarketData(None, None)
     assert market.execution_router.mode is ExecutionMode.PAPER
     assert market.live_market_data_health_tracker is None
+
+
+def test_stale_intent_guard_blocks_before_broker_position_read():
+    guard = LiveExecutionGuard(max_intent_age_seconds=3)
+    market, _, client, tracker = live_market(execution_guard=guard)
+    tracker.mark_connected(NOW - timedelta(seconds=1))
+    tracker.record_valid_tick(NOW, NOW)
+    stale = StrategyResult(
+        "test", SignalAction.BUY_CE, NOW - timedelta(seconds=4),
+        (SignalAction.BUY_CE,),
+    )
+    with pytest.raises(StaleLiveOrderIntentError):
+        market._execute_strategy_result(stale, NOW - timedelta(seconds=4))
+    assert client.positions_calls == client.place_order_calls == 0
+
+
+def test_local_rate_limit_blocks_before_broker_position_read():
+    guard = LiveExecutionGuard(max_orders=1, per_seconds=10)
+    guard.record_attempt(
+        LiveOrderIntent(
+            "NIFTY26AUG25100PE", "PE", SignalAction.BUY_PE, 65, 31.0, NOW
+        ),
+        NOW,
+    )
+    market, _, client, tracker = live_market(execution_guard=guard)
+    tracker.mark_connected(NOW - timedelta(seconds=1))
+    tracker.record_valid_tick(NOW, NOW)
+    with pytest.raises(LiveOrderRateLimitError):
+        market._execute_strategy_result(buy_result(), NOW)
+    assert client.positions_calls == client.place_order_calls == 0
