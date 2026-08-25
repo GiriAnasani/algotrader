@@ -1,6 +1,7 @@
 import pandas as pd
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import math
 from time import monotonic
 
 from kiteconnect import KiteTicker
@@ -20,6 +21,10 @@ from trading.execution_mode import ExecutionMode
 from trading.execution_router import ExecutionRouter
 from trading.live_execution import LiveExecutionCoordinator
 from trading.live_readiness import LiveReadinessGate
+from trading.market_data_health import (
+    MarketDataHealthState,
+    MarketDataHealthTracker,
+)
 from trading.live_order import LiveOrderIntent
 from trading.broker_order_status import BrokerOrderState
 from trading.broker_position_reconciler import (
@@ -86,6 +91,10 @@ class LivePositionLifecycleError(RuntimeError):
     """Raised when confirmed LIVE fill truth cannot update managed state."""
 
 
+class LiveMarketDataHealthError(RuntimeError):
+    """Raised when a new LIVE submission lacks trustworthy market data."""
+
+
 class MarketData:
     """
     Handles downloading historical
@@ -106,6 +115,8 @@ class MarketData:
         live_closed_position_history=None,
         live_closed_position_history_store=None,
         live_position_store=None,
+        live_market_data_health_tracker=None,
+        live_market_data_clock=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -180,6 +191,17 @@ class MarketData:
                 "Live closed-position history store must be a "
                 "ClosedPositionHistoryStore or None."
             )
+        if live_market_data_health_tracker is not None and not isinstance(
+            live_market_data_health_tracker, MarketDataHealthTracker
+        ):
+            raise TypeError(
+                "Live market-data health tracker must be a "
+                "MarketDataHealthTracker or None."
+            )
+        if live_market_data_clock is not None and not callable(
+            live_market_data_clock
+        ):
+            raise TypeError("Live market-data clock must be callable or None.")
 
         self.kite = kite
 
@@ -214,6 +236,12 @@ class MarketData:
         )
         self.live_closed_position_history_store = live_closed_position_history_store
         self.live_position_store = live_position_store
+        self.live_market_data_health_tracker = live_market_data_health_tracker
+        self._live_market_data_clock = (
+            live_market_data_clock
+            if live_market_data_clock is not None
+            else lambda: datetime.now(EXCHANGE_TIMEZONE)
+        )
         self.live_position_recovery_coordinator = (
             PositionRecoveryCoordinator(live_position_manager)
             if execution_mode is ExecutionMode.LIVE
@@ -333,6 +361,33 @@ class MarketData:
 
         return True
 
+    def _record_market_data_health_tick(self, tick):
+        """Records only timestamped positive finite subscribed feed data."""
+        tracker = self.live_market_data_health_tracker
+        if tracker is None:
+            return True
+        premium = tick.get("last_price")
+        timestamp = tick.get("exchange_timestamp")
+        is_valid_price = (
+            isinstance(premium, (int, float))
+            and not isinstance(premium, bool)
+            and math.isfinite(premium)
+            and premium > 0
+        )
+        is_valid_timestamp = (
+            isinstance(timestamp, datetime)
+            and timestamp.tzinfo is not None
+            and timestamp.utcoffset() is not None
+        )
+        if not is_valid_price or not is_valid_timestamp:
+            tracker.record_invalid_tick()
+            return False
+        observed_at = self._live_market_data_clock()
+        tracker.record_valid_tick(timestamp, observed_at)
+        if timestamp > observed_at:
+            return False
+        return True
+
     @staticmethod
     def _normalize_execution_time(timestamp):
         """Normalizes an exchange timestamp for paper execution."""
@@ -356,6 +411,12 @@ class MarketData:
             if action is SignalAction.HOLD:
                 continue
 
+            side = "CE" if action in (
+                SignalAction.BUY_CE,
+                SignalAction.EXIT_CE,
+            ) else "PE"
+            premium = self.latest_option_premiums.get(side)
+
             if (
                 self.execution_router.mode is ExecutionMode.LIVE
                 and self.pending_live_order is not None
@@ -369,14 +430,20 @@ class MarketData:
                     raise LiveReadinessError(
                         "LIVE execution requires a READY LiveReadinessGate."
                     )
+                if self.live_market_data_health_tracker is not None:
+                    observed_at = self._live_market_data_clock()
+                    health = self.live_market_data_health_tracker.snapshot(
+                        observed_at
+                    )
+                    if health.state is not MarketDataHealthState.HEALTHY:
+                        raise LiveMarketDataHealthError(
+                            "LIVE execution requires HEALTHY market data."
+                        )
+                    self._validate_live_option_premium_health(
+                        side, observed_at
+                    )
                 self._validate_live_position_context_consistency()
                 broker_positions = self._validate_live_broker_position_before_action()
-
-            side = "CE" if action in (
-                SignalAction.BUY_CE,
-                SignalAction.EXIT_CE,
-            ) else "PE"
-            premium = self.latest_option_premiums.get(side)
 
             if action in (SignalAction.BUY_CE, SignalAction.BUY_PE):
                 if self.nifty_option_pair is None:
@@ -527,6 +594,31 @@ class MarketData:
             self._validate_paper_state_consistency()
 
         return tuple(execution_results)
+
+    def _validate_live_option_premium_health(self, side, observed_at):
+        """Fails closed unless the selected side is fresh in this connection."""
+        tracker = self.live_market_data_health_tracker
+        timestamp = self.latest_option_timestamps.get(side)
+        is_aware = (
+            isinstance(timestamp, datetime)
+            and timestamp.tzinfo is not None
+            and timestamp.utcoffset() is not None
+        )
+        if not is_aware:
+            raise LiveMarketDataHealthError(
+                "LIVE execution requires a valid selected-option timestamp."
+            )
+        connected_at = tracker.connected_at
+        age_seconds = (observed_at - timestamp).total_seconds()
+        if (
+            connected_at is None
+            or timestamp < connected_at
+            or timestamp > observed_at
+            or age_seconds > tracker.stale_after_seconds
+        ):
+            raise LiveMarketDataHealthError(
+                "LIVE execution requires a fresh selected-option timestamp."
+            )
 
     def _validate_live_broker_position_before_action(self):
         """Fails closed unless broker net positions match confirmed LIVE state."""
@@ -1171,6 +1263,11 @@ class MarketData:
             response
         ):
 
+            if self.live_market_data_health_tracker is not None:
+                self.live_market_data_health_tracker.mark_connected(
+                    self._live_market_data_clock()
+                )
+
             print()
             print("=" * 60)
             print(
@@ -1199,6 +1296,12 @@ class MarketData:
         ):
 
             for tick in ticks:
+
+                is_option_tick = tick.get("instrument_token") in self.option_tokens
+                is_spot_tick = tick.get("instrument_token") == instrument_token
+                if is_option_tick or is_spot_tick:
+                    if not self._record_market_data_health_tick(tick):
+                        continue
 
                 if self._cache_option_premium(tick):
                     self._handle_option_tick(tick)
@@ -1321,6 +1424,11 @@ class MarketData:
             reason
         ):
 
+            if self.live_market_data_health_tracker is not None:
+                self.live_market_data_health_tracker.mark_disconnected(
+                    self._live_market_data_clock()
+                )
+
             print()
             print(
                 "WebSocket Closed"
@@ -1331,6 +1439,11 @@ class MarketData:
             code,
             reason
         ):
+
+            if self.live_market_data_health_tracker is not None:
+                self.live_market_data_health_tracker.mark_disconnected(
+                    self._live_market_data_clock()
+                )
 
             print()
             print(

@@ -7,6 +7,7 @@ from trading.broker_position_reconciler import BrokerPositionReconciler
 from trading.closed_position_history import ClosedPositionHistory
 from trading.closed_position_history_store import ClosedPositionHistoryStore
 from trading.live_execution import LiveExecutionCoordinator
+from trading.market_data_health import MarketDataHealthTracker
 from trading.live_readiness import LiveReadinessGate, LiveReadinessState
 from trading.live_recovery import LiveRecoveryCoordinator
 from trading.live_runtime import LiveRuntimeComponents, build_live_runtime
@@ -67,6 +68,7 @@ EXPECTED_TYPES = {
     "closed_position_history": ClosedPositionHistory,
     "closed_position_history_store": type(None),
     "position_store": type(None),
+    "market_data_health_tracker": MarketDataHealthTracker,
 }
 
 
@@ -167,7 +169,7 @@ def test_composition_is_construction_only_with_no_runtime_boundaries():
     assert components.readiness_gate.state is LiveReadinessState.NOT_READY
     source = inspect.getsource(build_live_runtime)
     for forbidden in (
-        "MarketData",
+        "MarketData(",
         "KiteConnect",
         "initialize(",
         "recover(",

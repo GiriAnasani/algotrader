@@ -29,4 +29,7 @@ def build_live_market_data(kite, instruments, runtime_components):
             runtime_components.closed_position_history_store
         ),
         live_position_store=runtime_components.position_store,
+        live_market_data_health_tracker=(
+            runtime_components.market_data_health_tracker
+        ),
     )
