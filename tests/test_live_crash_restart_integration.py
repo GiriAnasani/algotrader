@@ -132,8 +132,8 @@ def process_b(store_path, positions=None, orders=None, execution_enabled=False):
     startup = initialize_live_session(
         client,
         object(),
-        execution_enabled=execution_enabled,
     )
+    startup.runtime.execution_coordinator.enabled = execution_enabled
     store = PositionStore(store_path)
     return client, startup, store
 

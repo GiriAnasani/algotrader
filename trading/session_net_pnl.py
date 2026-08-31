@@ -90,6 +90,10 @@ class SessionNetPnLAggregator:
             )
         self._realized_net_pnl_aggregator = realized_net_pnl_aggregator
 
+    @property
+    def realized_net_pnl_aggregator(self):
+        return self._realized_net_pnl_aggregator
+
     def aggregate(
         self,
         trading_date,

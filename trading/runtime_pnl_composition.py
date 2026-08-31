@@ -65,6 +65,10 @@ class RuntimePnLComposition:
             )
         )
 
+    @property
+    def session_net_pnl_aggregator(self):
+        return self.snapshot_builder.session_net_pnl_aggregator
+
 
 def build_runtime_pnl_composition(market, charge_schedule):
     """Wire existing P&L components around one exact LIVE market authority."""
@@ -73,12 +77,28 @@ def build_runtime_pnl_composition(market, charge_schedule):
     if not isinstance(charge_schedule, OptionChargeSchedule):
         raise TypeError("Charge schedule must be an OptionChargeSchedule.")
 
-    charge_calculator = OptionTradeChargesCalculator(charge_schedule)
-    net_calculator = NetPnLCalculator(charge_calculator)
-    realized = RealizedNetPnLAggregator(net_calculator)
+    realized = RealizedNetPnLAggregator(
+        NetPnLCalculator(OptionTradeChargesCalculator(charge_schedule))
+    )
+    return build_runtime_pnl_composition_from_session_aggregator(
+        market, SessionNetPnLAggregator(realized)
+    )
+
+
+def build_runtime_pnl_composition_from_session_aggregator(
+    market, session_net_pnl_aggregator
+):
+    """Compose reporting from one caller-owned canonical economic authority."""
+    if not isinstance(market, MarketData):
+        raise TypeError("Market must be a MarketData.")
+    if not isinstance(session_net_pnl_aggregator, SessionNetPnLAggregator):
+        raise TypeError(
+            "Session net P&L aggregator must be a SessionNetPnLAggregator."
+        )
+    realized = session_net_pnl_aggregator.realized_net_pnl_aggregator
     snapshot_builder = RuntimePnLSnapshotBuilder(
         PortfolioNetPnLAggregator(realized),
-        SessionNetPnLAggregator(realized),
+        session_net_pnl_aggregator,
     )
     state_adapter = RuntimePnLStateAdapter(market)
     service = RuntimePnLService(state_adapter, snapshot_builder)

@@ -20,6 +20,7 @@ from trading.option_charges import (
 )
 from trading.realized_net_pnl import RealizedNetPnLAggregator
 from trading.session_net_pnl import SessionNetPnLAggregator
+from trading.runtime_pnl_composition import build_runtime_pnl_composition
 
 
 class FakeKiteClient:
@@ -107,7 +108,10 @@ def test_builder_and_result_retain_exact_config_and_are_immutable(tmp_path):
     result = builder.build()
     assert builder.config is config
     assert result.config is config
-    assert [field.name for field in fields(result)] == ["config", "runtime", "market"]
+    assert [field.name for field in fields(result)] == [
+        "config", "runtime", "market", "runtime_pnl"
+    ]
+    assert result.runtime_pnl is None
     with pytest.raises(FrozenInstanceError):
         result.config = make_config(tmp_path)
 
@@ -220,6 +224,21 @@ def test_live_uses_exact_configured_stores_and_shared_runtime_authorities(tmp_pa
     assert market.live_closed_position_history_store is runtime.closed_position_history_store
     assert market.live_position_manager is runtime.position_manager
     assert market.live_closed_position_history is runtime.closed_position_history
+    assert result.runtime_pnl.session_net_pnl_aggregator is (
+        runtime.risk_evaluator.session_net_pnl_aggregator
+    )
+
+
+def test_live_result_rejects_divergent_risk_and_reporting_economics(tmp_path):
+    config = make_config(tmp_path, mode=ExecutionMode.LIVE)
+    result = builder(config).build(FakeKiteClient(), object())
+    divergent = build_runtime_pnl_composition(
+        result.market, ZERODHA_NSE_OPTIONS_2026
+    )
+    with pytest.raises(ValueError, match="exact P&L authority"):
+        ProductionStartupComponents(
+            result.config, result.runtime, result.market, divergent
+        )
 
 
 @pytest.mark.parametrize("mode", [ExecutionMode.PAPER, ExecutionMode.LIVE])

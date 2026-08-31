@@ -145,3 +145,27 @@ def test_audit_failure_matrix_never_retries_and_preserves_safe_ordering(
     assert ProductionHealthInspector(runtime, market).inspect(NOW).state is (
         ProductionHealthState.NOT_READY
     )
+
+
+def test_confirmed_status_audit_failure_preserves_truth_and_revokes(tmp_path):
+    runtime, market, client, _, position_store, _ = graph(tmp_path)
+    sink = SelectiveAuditSink(AuditEventType.ORDER_STATUS_RECEIVED)
+    runtime.execution_coordinator._audit_sink = sink
+    market.live_audit_sink = sink
+    authorize(runtime)
+
+    with pytest.raises(AuditWriteError):
+        market._execute_strategy_result(signal(SignalAction.BUY_CE), NOW)
+
+    opened = runtime.position_manager.active_position
+    assert client.place_order_calls == 1
+    assert client.order_history_calls == 1
+    assert opened is not None
+    assert market.live_execution_context.contract_symbol == opened.contract_symbol
+    assert position_store.load().contract_symbol == opened.contract_symbol
+    assert not runtime.readiness_gate.is_ready
+
+    with pytest.raises(Exception, match="READY"):
+        market._execute_strategy_result(signal(SignalAction.BUY_PE), NOW)
+    assert client.place_order_calls == 1
+    assert runtime.position_manager.active_position is opened

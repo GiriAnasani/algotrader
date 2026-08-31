@@ -130,8 +130,8 @@ def test_exact_authorization_matrix(
     startup = initialize_live_session(
         client,
         object(),
-        execution_enabled=enabled,
     )
+    startup.runtime.execution_coordinator.enabled = enabled
     before = client.call_counts
 
     result = LiveRunAuthorizer().authorize(startup)
@@ -152,8 +152,8 @@ def test_authorization_observes_revocation_and_external_restoration_each_time():
     startup = initialize_live_session(
         client,
         object(),
-        execution_enabled=True,
     )
+    startup.runtime.execution_coordinator.enabled = True
     authorizer = LiveRunAuthorizer()
     original_recovery_result = startup.recovery_result
     market_context = startup.market.live_execution_context

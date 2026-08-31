@@ -17,7 +17,14 @@ from trading.runtime_pnl import RuntimePnLSnapshotBuilder
 from trading.runtime_pnl_composition import (
     RuntimePnLComposition,
     build_runtime_pnl_composition,
+    build_runtime_pnl_composition_from_session_aggregator,
 )
+from trading.option_charges import (
+    NetPnLCalculator,
+    OptionTradeChargesCalculator,
+)
+from trading.realized_net_pnl import RealizedNetPnLAggregator
+from trading.session_net_pnl import SessionNetPnLAggregator
 from trading.runtime_pnl_report import RuntimePnLReporter
 from trading.runtime_pnl_state import (
     PaperRuntimePnLStateUnsupportedError,
@@ -81,6 +88,22 @@ def test_composition_is_frozen_and_retains_exact_authority_and_components():
     assert isinstance(composition.service, RuntimePnLService)
     assert isinstance(composition.reporter, RuntimePnLReporter)
     with pytest.raises(FrozenInstanceError): composition.reporter = RuntimePnLReporter()
+
+
+def test_canonical_session_economics_are_shared_by_exact_identity():
+    session = SessionNetPnLAggregator(RealizedNetPnLAggregator(
+        NetPnLCalculator(OptionTradeChargesCalculator(SCHEDULE))
+    ))
+    composition = build_runtime_pnl_composition_from_session_aggregator(
+        market(), session
+    )
+    assert composition.session_net_pnl_aggregator is session
+    assert composition.snapshot_builder.session_net_pnl_aggregator is session
+    assert (
+        composition.snapshot_builder.portfolio_net_pnl_aggregator
+        ._realized_net_pnl_aggregator
+        is session.realized_net_pnl_aggregator
+    )
 
 
 @pytest.mark.parametrize("field,value", [

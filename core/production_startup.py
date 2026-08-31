@@ -11,6 +11,10 @@ from trading.live_runtime import LiveRuntimeComponents, build_live_runtime
 from trading.market import MarketData
 from trading.live_risk import LiveRiskLimits
 from trading.session_net_pnl import SessionNetPnLAggregator
+from trading.runtime_pnl_composition import (
+    RuntimePnLComposition,
+    build_runtime_pnl_composition_from_session_aggregator,
+)
 from trading.position_store import PositionStore
 
 
@@ -21,6 +25,7 @@ class ProductionStartupComponents:
     config: ProductionConfig
     runtime: LiveRuntimeComponents | None
     market: MarketData
+    runtime_pnl: RuntimePnLComposition | None = None
 
     def __post_init__(self):
         if not isinstance(self.config, ProductionConfig):
@@ -30,8 +35,20 @@ class ProductionStartupComponents:
         if self.config.execution_mode is ExecutionMode.PAPER:
             if self.runtime is not None:
                 raise ValueError("PAPER startup must not contain a LIVE runtime.")
+            if self.runtime_pnl is not None:
+                raise ValueError("PAPER startup must not contain LIVE runtime P&L.")
         elif not isinstance(self.runtime, LiveRuntimeComponents):
             raise TypeError("LIVE startup requires LiveRuntimeComponents.")
+        elif not isinstance(self.runtime_pnl, RuntimePnLComposition):
+            raise TypeError("LIVE startup requires RuntimePnLComposition.")
+        elif (
+            self.runtime.risk_evaluator is None
+            or self.runtime.risk_evaluator.session_net_pnl_aggregator
+            is not self.runtime_pnl.session_net_pnl_aggregator
+        ):
+            raise ValueError(
+                "LIVE risk and reporting must share the exact P&L authority."
+            )
         if self.market.execution_router.mode is not self.config.execution_mode:
             raise ValueError("Market execution mode must match its configuration.")
 
@@ -128,4 +145,9 @@ class ProductionStartupBuilder:
             audit_sink=audit_sink,
         )
         market = build_live_market_data(kite_client, instruments, runtime)
-        return ProductionStartupComponents(self._config, runtime, market)
+        runtime_pnl = build_runtime_pnl_composition_from_session_aggregator(
+            market, self._risk_session_net_pnl_aggregator
+        )
+        return ProductionStartupComponents(
+            self._config, runtime, market, runtime_pnl
+        )

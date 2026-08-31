@@ -29,6 +29,13 @@ def initialize_live_session(
     closed_position_history_store=None,
 ):
     """Builds LIVE dependencies and performs one explicit recovery inspection."""
+    if execution_enabled is not False:
+        if not isinstance(execution_enabled, bool):
+            raise TypeError("Execution enabled must be a boolean.")
+        raise ValueError(
+            "initialize_live_session cannot enable execution; use the "
+            "production application composition boundary."
+        )
     runtime_arguments = {"execution_enabled": execution_enabled}
     if closed_position_history_store is not None:
         runtime_arguments["closed_position_history_store"] = (

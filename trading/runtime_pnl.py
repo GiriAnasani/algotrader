@@ -97,6 +97,14 @@ class RuntimePnLSnapshotBuilder:
         self._portfolio_net_pnl_aggregator = portfolio_net_pnl_aggregator
         self._session_net_pnl_aggregator = session_net_pnl_aggregator
 
+    @property
+    def portfolio_net_pnl_aggregator(self):
+        return self._portfolio_net_pnl_aggregator
+
+    @property
+    def session_net_pnl_aggregator(self):
+        return self._session_net_pnl_aggregator
+
     def build(
         self,
         trading_date,

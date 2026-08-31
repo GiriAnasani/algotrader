@@ -93,9 +93,7 @@ def assert_no_broker_writes(client):
     assert client.modify_order_calls == 0
 
 
-@pytest.mark.parametrize("execution_enabled", [False, True])
 def test_safe_flat_startup_returns_shared_ready_session_without_trading(
-    execution_enabled,
 ):
     client = FakeKiteClient()
     instruments = object()
@@ -103,12 +101,12 @@ def test_safe_flat_startup_returns_shared_ready_session_without_trading(
     startup = initialize_live_session(
         client,
         instruments,
-        execution_enabled=execution_enabled,
+        execution_enabled=False,
     )
 
     assert isinstance(startup, LiveStartupResult)
     assert startup.recovery_result.state is LiveRecoveryState.SAFE_FLAT
-    assert startup.runtime.execution_coordinator.enabled is execution_enabled
+    assert startup.runtime.execution_coordinator.enabled is False
     assert startup.runtime.readiness_gate.state is LiveReadinessState.READY
     assert startup.is_ready is True
     assert startup.market.kite is client
@@ -131,6 +129,14 @@ def test_safe_flat_startup_returns_shared_ready_session_without_trading(
 
     with pytest.raises(FrozenInstanceError):
         startup.recovery_result = None
+
+
+def test_startup_helper_rejects_enabled_execution_before_composition():
+    client = FakeKiteClient()
+    with pytest.raises(ValueError, match="cannot enable execution"):
+        initialize_live_session(client, object(), execution_enabled=True)
+    assert client.positions_calls == client.orders_calls == 0
+    assert_no_broker_writes(client)
 
 
 @pytest.mark.parametrize(

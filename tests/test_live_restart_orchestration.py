@@ -204,8 +204,8 @@ def test_orchestration_preserves_enablement_and_authorization_boundary(
     startup = initialize_live_session(
         client,
         object(),
-        execution_enabled=execution_enabled,
     )
+    startup.runtime.execution_coordinator.enabled = execution_enabled
     store = (
         store_with(tmp_path, managed())
         if restored

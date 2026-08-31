@@ -578,12 +578,16 @@ class MarketData:
                 )
                 if is_pending:
                     self.live_readiness_gate.revoke()
-                self._write_live_audit(
-                    AuditEventType.ORDER_STATUS_RECEIVED,
-                    observed_at or execution_time,
-                    {"order_id": order_id, "state": broker_status.state},
-                    live_order_correlation_id(execution_result),
-                )
+                try:
+                    self._write_live_audit(
+                        AuditEventType.ORDER_STATUS_RECEIVED,
+                        observed_at or execution_time,
+                        {"order_id": order_id, "state": broker_status.state},
+                        live_order_correlation_id(execution_result),
+                    )
+                except Exception:
+                    self.live_readiness_gate.revoke()
+                    raise
                 if is_pending:
                     self._write_live_audit(
                         AuditEventType.ORDER_PENDING,

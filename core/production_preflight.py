@@ -16,7 +16,6 @@ from core.production_health import (
 from trading.execution_mode import ExecutionMode
 from trading.live_recovery import LiveRecoveryState
 from trading.live_restart_orchestration import LiveRestartOrchestrationState
-from trading.session_net_pnl import SessionNetPnLAggregator
 
 
 class ProductionPreflightStatus(Enum):
@@ -318,15 +317,14 @@ class ProductionPreflightInspector:
         risk_pnl_configured = (
             runtime is not None
             and runtime.risk_evaluator is not None
-            and isinstance(
-                runtime.risk_evaluator.session_net_pnl_aggregator,
-                SessionNetPnLAggregator,
-            )
+            and components.runtime_pnl is not None
+            and runtime.risk_evaluator.session_net_pnl_aggregator
+            is components.runtime_pnl.session_net_pnl_aggregator
         )
         add(
             "RISK_PNL_CONFIGURATION", risk_pnl_configured,
-            "Runtime risk P&L dependency is configured."
-            if risk_pnl_configured else "Runtime risk P&L dependency is inconsistent.",
+            "Runtime risk and reporting share one P&L dependency."
+            if risk_pnl_configured else "Runtime risk and reporting P&L are inconsistent.",
         )
         audit_path = (
             runtime is not None
