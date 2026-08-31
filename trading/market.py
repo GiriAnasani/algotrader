@@ -257,6 +257,7 @@ class MarketData:
         self.live_risk_evaluator = live_risk_evaluator
         self.live_risk_guard = live_risk_guard
         self.live_audit_sink = live_audit_sink
+        self._live_ticker = None
         self._live_market_data_clock = (
             live_market_data_clock
             if live_market_data_clock is not None
@@ -1351,6 +1352,7 @@ class MarketData:
             KITE_API_KEY,
             self.kite.access_token
         )
+        self._live_ticker = kws
 
         def on_connect(
             ws,
@@ -1550,3 +1552,18 @@ class MarketData:
         kws.on_error = on_error
 
         kws.connect()
+
+    def disconnect_live(self):
+        """Idempotently disconnect the exact ticker acquired by connect_live."""
+        ticker = self._live_ticker
+        if ticker is None:
+            return False
+        self._live_ticker = None
+        try:
+            ticker.close()
+        finally:
+            if self.live_market_data_health_tracker is not None:
+                self.live_market_data_health_tracker.mark_disconnected(
+                    self._live_market_data_clock()
+                )
+        return True

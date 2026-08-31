@@ -68,6 +68,10 @@ class LiveExecutionCoordinator:
         if self._execution_guard is not None:
             self._execution_guard.preflight(intent, observed_at)
 
+    def disable(self):
+        """Idempotently prevent future LIVE submissions."""
+        self.enabled = False
+
     def execute(self, intent, observed_at=None):
         """Submits one live intent only when explicit authorization is enabled."""
         if not isinstance(intent, LiveOrderIntent):
