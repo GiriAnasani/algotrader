@@ -1,0 +1,493 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Review-only Phase 11.2 foundation for one execution-disabled algotrader host.
+  This template contains no application deployment or Zerodha credentials.
+
+Parameters:
+  Project:
+    Type: String
+    Default: algotrader
+    AllowedPattern: "[a-zA-Z0-9-]+"
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - production
+  Owner:
+    Type: String
+    Description: Human or team accountable for the production environment.
+    MinLength: 1
+  ExecutionOwner:
+    Type: String
+    Default: NONE_EXECUTION_DISABLED
+    Description: Must remain NONE_EXECUTION_DISABLED during foundation setup.
+    AllowedValues:
+      - NONE_EXECUTION_DISABLED
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/24
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.20.0.0/26
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 20
+    MinValue: 16
+    MaxValue: 64
+  StateVolumeSizeGiB:
+    Type: Number
+    Default: 8
+    MinValue: 4
+    MaxValue: 64
+  SecretName:
+    Type: String
+    Default: algotrader/production/kite
+    AllowedPattern: "[a-zA-Z0-9/_+=.@-]+"
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+  SnapshotRetentionCount:
+    Type: Number
+    Default: 14
+    MinValue: 2
+    MaxValue: 35
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-vpc"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: network}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-igw"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: network}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref Vpc
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-public"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: network}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-public"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: network}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  NoIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: No ingress; restricted outbound for the production bot host.
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - Description: TLS for AWS management, packages, Zerodha REST, and WebSocket.
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: DNS over UDP to the VPC resolver.
+          IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: !Ref VpcCidr
+        - Description: DNS fallback over TCP to the VPC resolver.
+          IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: !Ref VpcCidr
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-no-ingress"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: network}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  KiteSecretBoundary:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: >-
+        Empty Phase 11.2 boundary. Replace only through the approved manual
+        secrets procedure; never place Zerodha credentials in this template.
+      Name: !Ref SecretName
+      SecretString: '{"configured":false}'
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: secrets-boundary}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/${Project}/${Environment}/application"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: application-logs}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  SystemLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/${Project}/${Environment}/system"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: system-logs}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: ReadExactKiteSecret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref KiteSecretBoundary
+        - PolicyName: WriteExactProductionLogsAndMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "${ApplicationLogGroup.Arn}:*"
+                  - !Sub "${SystemLogGroup.Arn}:*"
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Algotrader/Host
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: runtime-iam}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+            Iops: 3000
+            VolumeSize: !Ref RootVolumeSizeGiB
+            VolumeType: gp3
+      CreditSpecification:
+        CPUCredits: unlimited
+      IamInstanceProfile: !Ref InstanceProfile
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
+        HttpTokens: required
+        InstanceMetadataTags: disabled
+      Monitoring: false
+      SecurityGroupIds:
+        - !Ref NoIngressSecurityGroup
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-bot"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: runtime-host}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-execution-ip"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: static-network-identity}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  StateVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !GetAtt Instance.AvailabilityZone
+      Encrypted: true
+      Iops: 3000
+      MultiAttachEnabled: false
+      Size: !Ref StateVolumeSizeGiB
+      Throughput: 125
+      VolumeType: gp3
+      Tags:
+        - {Key: Name, Value: !Sub "${Project}-${Environment}-authoritative-state"}
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: authoritative-state}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+        - {Key: Backup, Value: Daily}
+        - {Key: MountPoint, Value: /var/lib/algotrader}
+
+  StateVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      Device: /dev/sdf
+      InstanceId: !Ref Instance
+      VolumeId: !Ref StateVolume
+
+  SnapshotLifecycleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: dlm.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: state-backup}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  StateSnapshotLifecycle:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: Daily snapshots of the authoritative algotrader state volume.
+      ExecutionRoleArn: !GetAtt SnapshotLifecycleRole.Arn
+      State: ENABLED
+      PolicyDetails:
+        PolicyType: EBS_SNAPSHOT_MANAGEMENT
+        ResourceTypes:
+          - VOLUME
+        TargetTags:
+          - Key: Backup
+            Value: Daily
+        Schedules:
+          - Name: DailyStateSnapshots
+            CopyTags: true
+            CreateRule:
+              Interval: 24
+              IntervalUnit: HOURS
+              Times:
+                - "20:00"
+            RetainRule:
+              Count: !Ref SnapshotRetentionCount
+            TagsToAdd:
+              - Key: Project
+                Value: !Ref Project
+              - Key: Environment
+                Value: !Ref Environment
+              - Key: Component
+                Value: authoritative-state-backup
+              - Key: ManagedBy
+                Value: DLM
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: state-backup}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  CpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Sustained host CPU pressure; no automatic execution action.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref Instance
+      EvaluationPeriods: 3
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 300
+      Statistic: Average
+      Threshold: 80
+      TreatMissingData: missing
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: host-monitoring}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+  InstanceStatusAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: EC2 instance or system status check failure.
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref Instance
+      EvaluationPeriods: 2
+      MetricName: StatusCheckFailed
+      Namespace: AWS/EC2
+      Period: 300
+      Statistic: Maximum
+      Threshold: 1
+      TreatMissingData: missing
+      Tags:
+        - {Key: Project, Value: !Ref Project}
+        - {Key: Environment, Value: !Ref Environment}
+        - {Key: Owner, Value: !Ref Owner}
+        - {Key: Component, Value: host-monitoring}
+        - {Key: ExecutionOwner, Value: !Ref ExecutionOwner}
+        - {Key: ManagedBy, Value: CloudFormation}
+
+Outputs:
+  Region:
+    Value: !Ref AWS::Region
+  InstanceId:
+    Value: !Ref Instance
+  ElasticIpAddress:
+    Description: Do not register with Zerodha until Phase 11.3 approval.
+    Value: !Ref ElasticIp
+  SecurityGroupId:
+    Value: !Ref NoIngressSecurityGroup
+  StateVolumeId:
+    Description: Authoritative retained volume; Multi-Attach is disabled.
+    Value: !Ref StateVolume
+  InstanceRoleArn:
+    Value: !GetAtt InstanceRole.Arn
+  KiteSecretArn:
+    Description: Empty boundary only; it contains no Zerodha credential.
+    Value: !Ref KiteSecretBoundary
+  ApplicationLogGroupName:
+    Value: !Ref ApplicationLogGroup
+  SystemLogGroupName:
+    Value: !Ref SystemLogGroup

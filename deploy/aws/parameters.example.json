@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "Project",
+    "ParameterValue": "algotrader"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "Owner",
+    "ParameterValue": "REPLACE_BEFORE_APPLY"
+  },
+  {
+    "ParameterKey": "ExecutionOwner",
+    "ParameterValue": "NONE_EXECUTION_DISABLED"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.small"
+  },
+  {
+    "ParameterKey": "RootVolumeSizeGiB",
+    "ParameterValue": "20"
+  },
+  {
+    "ParameterKey": "StateVolumeSizeGiB",
+    "ParameterValue": "8"
+  }
+]
