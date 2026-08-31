@@ -54,6 +54,57 @@ class ProductionHealthSnapshot:
         )
 
 
+def production_position_context_consistent(position, context):
+    """Return whether current position and execution-context truth agree."""
+    if position is None or context is None:
+        return position is None and context is None
+    return (
+        position.contract_symbol == context.contract_symbol
+        and position.quantity == context.quantity
+        and position.side.value == context.side
+    )
+
+
+def production_authority_identity_issues(runtime, market):
+    """Return stable identity issues without observing external systems."""
+    issues = []
+    if runtime.position_manager is not market.live_position_manager:
+        issues.append("POSITION_MANAGER_IDENTITY_MISMATCH")
+    if runtime.market_data_health_tracker is not market.live_market_data_health_tracker:
+        issues.append("MARKET_DATA_TRACKER_IDENTITY_MISMATCH")
+    if runtime.readiness_gate is not market.live_readiness_gate:
+        issues.append("READINESS_GATE_IDENTITY_MISMATCH")
+    if runtime.execution_coordinator is not market.live_execution_coordinator:
+        issues.append("EXECUTION_COORDINATOR_IDENTITY_MISMATCH")
+    if runtime.closed_position_history is not market.live_closed_position_history:
+        issues.append("CLOSED_POSITION_HISTORY_IDENTITY_MISMATCH")
+
+    risk_pair = runtime.risk_evaluator is not None and runtime.risk_guard is not None
+    if (runtime.risk_evaluator is None) is not (runtime.risk_guard is None):
+        issues.append("RISK_CONFIGURATION_MISMATCH")
+    elif not risk_pair:
+        issues.append("RISK_NOT_CONFIGURED")
+    if (
+        runtime.risk_evaluator is not market.live_risk_evaluator
+        or runtime.risk_guard is not market.live_risk_guard
+    ):
+        issues.append("RISK_IDENTITY_MISMATCH")
+    if risk_pair and (
+        runtime.risk_evaluator.position_manager is not runtime.position_manager
+        or runtime.risk_evaluator.closed_position_history
+        is not runtime.closed_position_history
+    ):
+        issues.append("RISK_AUTHORITY_IDENTITY_MISMATCH")
+
+    if runtime.audit_sink is None:
+        issues.append("AUDIT_NOT_CONFIGURED")
+    if runtime.audit_sink is not market.live_audit_sink:
+        issues.append("AUDIT_IDENTITY_MISMATCH")
+    if runtime.execution_guard is not runtime.execution_coordinator._execution_guard:
+        issues.append("EXECUTION_GUARD_IDENTITY_MISMATCH")
+    return tuple(issues)
+
+
 class ProductionHealthInspector:
     """Observes existing LIVE authorities without calls, writes, or mutation."""
 
@@ -81,7 +132,9 @@ class ProductionHealthInspector:
         enabled = runtime.execution_coordinator.enabled
         pending = market.pending_live_order is not None
         active = runtime.position_manager.active_position
-        consistent = self._position_consistent(active, market.live_execution_context)
+        consistent = production_position_context_consistent(
+            active, market.live_execution_context
+        )
 
         if readiness is not LiveReadinessState.READY:
             issues.append("READINESS_NOT_READY")
@@ -92,42 +145,9 @@ class ProductionHealthInspector:
         if not consistent:
             issues.append("POSITION_CONTEXT_MISMATCH")
 
-        if runtime.position_manager is not market.live_position_manager:
-            issues.append("POSITION_MANAGER_IDENTITY_MISMATCH")
-        if runtime.market_data_health_tracker is not market.live_market_data_health_tracker:
-            issues.append("MARKET_DATA_TRACKER_IDENTITY_MISMATCH")
-        if runtime.readiness_gate is not market.live_readiness_gate:
-            issues.append("READINESS_GATE_IDENTITY_MISMATCH")
-        if runtime.execution_coordinator is not market.live_execution_coordinator:
-            issues.append("EXECUTION_COORDINATOR_IDENTITY_MISMATCH")
-        if runtime.closed_position_history is not market.live_closed_position_history:
-            issues.append("CLOSED_POSITION_HISTORY_IDENTITY_MISMATCH")
-
+        issues.extend(production_authority_identity_issues(runtime, market))
         risk_pair = runtime.risk_evaluator is not None and runtime.risk_guard is not None
-        if (runtime.risk_evaluator is None) is not (runtime.risk_guard is None):
-            issues.append("RISK_CONFIGURATION_MISMATCH")
-        elif not risk_pair:
-            issues.append("RISK_NOT_CONFIGURED")
-        if (
-            runtime.risk_evaluator is not market.live_risk_evaluator
-            or runtime.risk_guard is not market.live_risk_guard
-        ):
-            issues.append("RISK_IDENTITY_MISMATCH")
-        if risk_pair and (
-            runtime.risk_evaluator.position_manager is not runtime.position_manager
-            or runtime.risk_evaluator.closed_position_history
-            is not runtime.closed_position_history
-        ):
-            issues.append("RISK_AUTHORITY_IDENTITY_MISMATCH")
-
         audit_configured = runtime.audit_sink is not None
-        if not audit_configured:
-            issues.append("AUDIT_NOT_CONFIGURED")
-        if runtime.audit_sink is not market.live_audit_sink:
-            issues.append("AUDIT_IDENTITY_MISMATCH")
-
-        if runtime.execution_guard is not runtime.execution_coordinator._execution_guard:
-            issues.append("EXECUTION_GUARD_IDENTITY_MISMATCH")
         if not enabled:
             issues.append("EXECUTION_DISABLED")
 
@@ -145,10 +165,4 @@ class ProductionHealthInspector:
 
     @staticmethod
     def _position_consistent(position, context):
-        if position is None or context is None:
-            return position is None and context is None
-        return (
-            position.contract_symbol == context.contract_symbol
-            and position.quantity == context.quantity
-            and position.side.value == context.side
-        )
+        return production_position_context_consistent(position, context)

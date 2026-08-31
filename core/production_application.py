@@ -3,6 +3,7 @@
 from enum import Enum
 
 from core.production_auth import (
+    ProductionAuthenticationResult,
     ProductionAuthenticationState,
     ProductionAuthenticator,
 )
@@ -46,6 +47,7 @@ class ProductionApplication:
         self._instruments = instruments
         self._state = ProductionApplicationState.CREATED
         self._components = None
+        self._authentication_result = None
         self._startup_result = None
         self._restart_result = None
 
@@ -54,8 +56,16 @@ class ProductionApplication:
         return self._state
 
     @property
+    def config(self):
+        return self._builder.config
+
+    @property
     def components(self):
         return self._components
+
+    @property
+    def authentication_result(self):
+        return self._authentication_result
 
     @property
     def startup_result(self):
@@ -83,6 +93,11 @@ class ProductionApplication:
             if self._instruments is None:
                 raise ProductionApplicationError("LIVE startup requires instruments.")
             authentication = self._authenticator.restore(now)
+            if not isinstance(authentication, ProductionAuthenticationResult):
+                raise TypeError(
+                    "Authenticator must return a ProductionAuthenticationResult."
+                )
+            self._authentication_result = authentication
             if authentication.state is ProductionAuthenticationState.LOGIN_REQUIRED:
                 self._state = ProductionApplicationState.LOGIN_REQUIRED
                 return authentication
