@@ -386,7 +386,7 @@ Resources:
   StateSnapshotLifecycle:
     Type: AWS::DLM::LifecyclePolicy
     Properties:
-      Description: Daily snapshots of the authoritative algotrader state volume.
+      Description: Daily snapshots of the authoritative algotrader state volume
       ExecutionRoleArn: !GetAtt SnapshotLifecycleRole.Arn
       State: ENABLED
       PolicyDetails:
