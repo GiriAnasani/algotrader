@@ -1,0 +1,54 @@
+[
+  {
+    "ParameterKey": "Project",
+    "ParameterValue": "algotrader"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  },
+  {
+    "ParameterKey": "Owner",
+    "ParameterValue": "algotrader-production"
+  },
+  {
+    "ParameterKey": "ExecutionOwner",
+    "ParameterValue": "NONE_EXECUTION_DISABLED"
+  },
+  {
+    "ParameterKey": "VpcCidr",
+    "ParameterValue": "10.20.0.0/24"
+  },
+  {
+    "ParameterKey": "PublicSubnetCidr",
+    "ParameterValue": "10.20.0.0/26"
+  },
+  {
+    "ParameterKey": "InstanceType",
+    "ParameterValue": "t3.small"
+  },
+  {
+    "ParameterKey": "LatestAmiId",
+    "ParameterValue": "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+  },
+  {
+    "ParameterKey": "RootVolumeSizeGiB",
+    "ParameterValue": "20"
+  },
+  {
+    "ParameterKey": "StateVolumeSizeGiB",
+    "ParameterValue": "8"
+  },
+  {
+    "ParameterKey": "SecretName",
+    "ParameterValue": "algotrader/production/kite"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "SnapshotRetentionCount",
+    "ParameterValue": "14"
+  }
+]
