@@ -1,14 +1,16 @@
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 
 
-SESSION_DIR = Path("sessions")
+STATE_DIR = Path(os.getenv("JARVIS_STATE_DIR", "."))
+SESSION_DIR = STATE_DIR / "sessions"
 SESSION_FILE = SESSION_DIR / "session.json"
 
 
 def save_session(session):
-    SESSION_DIR.mkdir(exist_ok=True)
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
 
     data = {
         "access_token": session["access_token"],
