@@ -7,7 +7,7 @@ class IndicatorEngine:
     Updates configured indicators from completed candles.
     """
 
-    DEFAULT_EMA_PERIODS = [10, 20, 50, 100, 200]
+    DEFAULT_EMA_PERIODS = [9, 10, 20, 50, 100, 200]
 
     def __init__(
         self,
