@@ -66,6 +66,8 @@ from trading.paper_session import calculate_session_summary
 from trading.paper_position import PaperPosition
 from trading.paper_trade import PaperTrade
 from trading.strategy import SignalAction
+from trading.strategy2 import FrozenStrategy2Engine
+from trading.strategy2_pending_entry import Strategy2PendingEntryManager
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,15 @@ class MarketData:
         # Strategy
         self.strategy_engine = StrategyEngine(target_points=2.0)
         self.latest_strategy_result = None
+
+        # Frozen Strategy 2 shadow path. No broker execution.
+        self.strategy2_engine = FrozenStrategy2Engine()
+        self.strategy2_pending_entry_manager = Strategy2PendingEntryManager()
+        self.latest_strategy2_result = None
+        self.strategy2_option_tokens = {}
+        self.strategy2_pending_contract = None
+        self.strategy2_theoretical_entry = None
+        self.strategy2_theoretical_entry_error = None
         self.paper_execution_engine = PaperExecutionEngine()
         self.execution_router = ExecutionRouter(
             mode=execution_mode,
@@ -416,9 +427,135 @@ class MarketData:
             raise TypeError("Exchange timestamp must be a datetime.")
 
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            return timestamp.replace(tzinfo=EXCHANGE_TIMEZONE)
+            return timestamp.astimezone(EXCHANGE_TIMEZONE)
 
         return timestamp.astimezone(EXCHANGE_TIMEZONE)
+
+    def _process_strategy2_shadow(self, snapshot):
+        # Evaluate frozen Strategy 2 without routing any order.
+        result = self.strategy2_engine.evaluate(
+            snapshot,
+            option_premiums=dict(self.latest_option_premiums),
+        )
+
+        self.latest_strategy2_result = result
+
+        if result.action not in (
+            SignalAction.BUY_CE,
+            SignalAction.BUY_PE,
+        ):
+            return result
+
+        if self.strategy2_pending_entry_manager.pending_entry is not None:
+            return result
+
+        if self.strategy2_engine.active_position is not None:
+            return result
+
+        direction = (
+            "CE"
+            if result.action is SignalAction.BUY_CE
+            else "PE"
+        )
+
+        contract = self.instruments.get_nifty_strategy2_contract(
+            snapshot.candle.close,
+            direction,
+            as_of=snapshot.candle.time,
+        )
+
+        pending = self.strategy2_pending_entry_manager.create(
+            direction=direction,
+            confirmation_time=snapshot.candle.time,
+            contract=contract,
+            active_position=False,
+        )
+
+        self.strategy2_pending_contract = contract
+        token = int(contract["instrument_token"])
+        self.strategy2_option_tokens[token] = direction
+
+        ticker = getattr(self, "_live_ticker", None)
+        if ticker is not None:
+            ticker.subscribe([token])
+            ticker.set_mode(ticker.MODE_FULL, [token])
+
+        return result
+
+    def _handle_strategy2_option_tick(self, tick):
+        # Captures the frozen Strategy 2 next-minute option-open reference.
+        token = tick.get("instrument_token")
+        pending = self.strategy2_pending_entry_manager.pending_entry
+        contract = self.strategy2_pending_contract
+
+        if (
+            pending is None
+            or contract is None
+            or token != pending.instrument_token
+            or token != contract.get("instrument_token")
+        ):
+            return False
+
+        direction = self.strategy2_option_tokens.get(token)
+        if direction != pending.direction:
+            return False
+
+        timestamp = tick.get("exchange_timestamp")
+        premium = tick.get("last_price")
+
+        if timestamp is None:
+            return True
+
+        timestamp = self._normalize_execution_time(timestamp)
+
+        if (
+            not isinstance(premium, (int, float))
+            or isinstance(premium, bool)
+            or not math.isfinite(premium)
+            or premium <= 0
+        ):
+            return True
+
+        expected_minute = pending.expected_entry_time.replace(
+            second=0,
+            microsecond=0,
+        )
+        observed_minute = timestamp.replace(
+            second=0,
+            microsecond=0,
+        )
+
+        if observed_minute < expected_minute:
+            return True
+
+        if observed_minute > expected_minute:
+            self.strategy2_theoretical_entry_error = (
+                "MISSED_EXPECTED_ENTRY_MINUTE"
+            )
+            self.strategy2_pending_entry_manager.clear()
+            self.strategy2_pending_contract = None
+            self.strategy2_option_tokens.pop(token, None)
+            return True
+
+        if self.strategy2_theoretical_entry is not None:
+            return True
+
+        self.strategy2_theoretical_entry = {
+            "direction": pending.direction,
+            "contract_symbol": pending.contract_symbol,
+            "instrument_token": pending.instrument_token,
+            "confirmation_time": pending.confirmation_time,
+            "expected_entry_time": pending.expected_entry_time,
+            "theoretical_entry_time": timestamp,
+            "theoretical_entry_price": float(premium),
+        }
+
+        self.strategy2_pending_entry_manager.clear()
+        self.strategy2_pending_contract = None
+        self.strategy2_option_tokens.pop(token, None)
+        self.strategy2_engine.set_position_active(direction)
+
+        return True
 
     def _execute_strategy_result(self, strategy_result, execution_time):
         """Routes ordered strategy actions through the execution router."""
@@ -1398,10 +1535,16 @@ class MarketData:
             for tick in ticks:
 
                 is_option_tick = tick.get("instrument_token") in self.option_tokens
+                is_strategy2_option_tick = (
+                    tick.get("instrument_token") in self.strategy2_option_tokens
+                )
                 is_spot_tick = tick.get("instrument_token") == instrument_token
-                if is_option_tick or is_spot_tick:
+                if is_option_tick or is_strategy2_option_tick or is_spot_tick:
                     if not self._record_market_data_health_tick(tick):
                         continue
+
+                if self._handle_strategy2_option_tick(tick):
+                    continue
 
                 if self._cache_option_premium(tick):
                     self._handle_option_tick(tick)
@@ -1477,6 +1620,8 @@ class MarketData:
                         self.latest_strategy_result = (
                             strategy_result
                         )
+
+                        self._process_strategy2_shadow(snapshot)
 
                         self._execute_strategy_result(
                             strategy_result,

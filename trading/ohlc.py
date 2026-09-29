@@ -110,8 +110,8 @@ class OHLCBuilder:
             )
 
         if timestamp.tzinfo is None:
-            return timestamp.replace(
-                tzinfo=self.exchange_timezone
+            return timestamp.astimezone(
+                self.exchange_timezone
             )
 
         return timestamp.astimezone(

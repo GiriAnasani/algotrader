@@ -369,6 +369,75 @@ class InstrumentManager:
             "PE": selected["PE"]
         }
 
+    def get_nifty_strategy2_contract(
+        self,
+        spot_price,
+        option_type,
+        as_of=None,
+    ):
+        """
+        Returns the frozen Strategy 2 nearest 1-step OTM NIFTY contract.
+
+        CE -> ATM + 50
+        PE -> ATM - 50
+
+        ATM and expiry are derived from the canonical
+        get_nifty_option_pair() logic.
+        """
+
+        option_type = option_type.strip().upper()
+
+        if option_type not in ("CE", "PE"):
+            raise ValueError("Strategy 2 option type must be CE or PE.")
+
+        atm_pair = self.get_nifty_option_pair(
+            spot_price,
+            as_of=as_of,
+        )
+
+        expiry = atm_pair["expiry"]
+        atm_strike = float(atm_pair["strike"])
+
+        if option_type == "CE":
+            otm_strike = atm_strike + 50.0
+        else:
+            otm_strike = atm_strike - 50.0
+
+        df = self.load_instruments().copy()
+
+        expiry_dates = pd.to_datetime(
+            df["expiry"],
+            errors="coerce",
+        ).dt.date
+
+        contracts = df[
+            (df["name"] == "NIFTY")
+            & (df["exchange"] == "NFO")
+            & (df["segment"] == "NFO-OPT")
+            & (df["instrument_type"] == option_type)
+            & (expiry_dates == expiry)
+            & (df["strike"] == otm_strike)
+        ]
+
+        if len(contracts) != 1:
+            raise ValueError(
+                f"Expected exactly one Strategy 2 NIFTY {option_type} "
+                f"contract for expiry {expiry} and strike {otm_strike}."
+            )
+
+        contract = contracts.iloc[0]
+
+        return {
+            "instrument_token": int(contract["instrument_token"]),
+            "tradingsymbol": contract["tradingsymbol"],
+            "expiry": expiry,
+            "atm_strike": atm_strike,
+            "otm_strike": otm_strike,
+            "strike": float(contract["strike"]),
+            "lot_size": int(contract["lot_size"]),
+            "option_type": option_type,
+        }
+
     def get_instrument_token(self, symbol):
         """
         Returns the instrument token

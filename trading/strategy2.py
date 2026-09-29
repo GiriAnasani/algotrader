@@ -59,7 +59,13 @@ class FrozenStrategy2Engine:
         self.active_position = None
         self._reset_setup()
 
-    def evaluate(self, snapshot: IndicatorSnapshot) -> StrategyResult:
+    def evaluate(
+        self,
+        snapshot: IndicatorSnapshot,
+        option_premiums=None,
+    ) -> StrategyResult:
+        _ = option_premiums
+
         if not isinstance(snapshot, IndicatorSnapshot):
             raise TypeError("Expected IndicatorSnapshot object.")
 
@@ -94,7 +100,11 @@ class FrozenStrategy2Engine:
                 self.direction = "PE"
                 self.qualified_at = candle.time
 
-        if self.state is SetupState.TREND_QUALIFIED:
+        if (
+            self.state is SetupState.TREND_QUALIFIED
+            and self.qualified_at is not None
+            and candle.time > self.qualified_at
+        ):
             if self.direction == "CE" and self._bullish_pullback(candle, ema9, ema20):
                 self.state = SetupState.PULLBACK_DETECTED
                 self.pullback_at = candle.time
@@ -125,7 +135,10 @@ class FrozenStrategy2Engine:
         if p9 is None or p20 is None:
             return False
         last5 = prev[-5:]
-        changes = [prev[i].close - prev[i - 1].close for i in range(len(prev) - 4, len(prev))]
+        changes = [
+            prev[i].close - prev[i - 1].close
+            for i in range(len(prev) - 5, len(prev))
+        ]
         return (
             e9 > e20
             and e9 > p9
@@ -140,7 +153,10 @@ class FrozenStrategy2Engine:
         if p9 is None or p20 is None:
             return False
         last5 = prev[-5:]
-        changes = [prev[i].close - prev[i - 1].close for i in range(len(prev) - 4, len(prev))]
+        changes = [
+            prev[i].close - prev[i - 1].close
+            for i in range(len(prev) - 5, len(prev))
+        ]
         return (
             e9 < e20
             and e9 < p9
