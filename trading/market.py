@@ -244,6 +244,8 @@ class MarketData:
         self.strategy2_pending_contract = None
         self.strategy2_theoretical_entry = None
         self.strategy2_theoretical_entry_error = None
+        self.strategy2_shadow_position = None
+        self.strategy2_shadow_exit = None
         self.paper_execution_engine = PaperExecutionEngine()
         self.execution_router = ExecutionRouter(
             mode=execution_mode,
@@ -471,6 +473,8 @@ class MarketData:
             active_position=False,
         )
 
+        self.strategy2_theoretical_entry = None
+        self.strategy2_theoretical_entry_error = None
         self.strategy2_pending_contract = contract
         token = int(contract["instrument_token"])
         self.strategy2_option_tokens[token] = direction
@@ -485,6 +489,50 @@ class MarketData:
     def _handle_strategy2_option_tick(self, tick):
         # Captures the frozen Strategy 2 next-minute option-open reference.
         token = tick.get("instrument_token")
+        position = self.strategy2_shadow_position
+
+        if position is not None and position["active"]:
+            if token != position["instrument_token"]:
+                return False
+
+            timestamp = tick.get("exchange_timestamp")
+            premium = tick.get("last_price")
+
+            if timestamp is None:
+                return True
+
+            timestamp = self._normalize_execution_time(timestamp)
+
+            if (
+                not isinstance(premium, (int, float))
+                or isinstance(premium, bool)
+                or not math.isfinite(premium)
+                or premium <= 0
+            ):
+                return True
+
+            reason = None
+            if premium >= position["target_price"]:
+                reason = "TARGET"
+            elif premium <= position["stop_price"]:
+                reason = "STOP"
+
+            if reason is None:
+                return True
+
+            position["active"] = False
+            position["exit_time"] = timestamp
+            position["exit_price"] = float(premium)
+            position["exit_reason"] = reason
+            self.strategy2_shadow_exit = {
+                "exit_time": timestamp,
+                "exit_price": float(premium),
+                "exit_reason": reason,
+            }
+            self.strategy2_option_tokens.pop(token, None)
+            self.strategy2_engine.set_position_closed()
+            return True
+
         pending = self.strategy2_pending_entry_manager.pending_entry
         contract = self.strategy2_pending_contract
 
@@ -549,10 +597,21 @@ class MarketData:
             "theoretical_entry_time": timestamp,
             "theoretical_entry_price": float(premium),
         }
+        entry_price = float(premium)
+        self.strategy2_shadow_position = {
+            "active": True,
+            "direction": pending.direction,
+            "contract_symbol": pending.contract_symbol,
+            "instrument_token": pending.instrument_token,
+            "entry_time": timestamp,
+            "entry_price": entry_price,
+            "target_price": entry_price * 1.35,
+            "stop_price": entry_price * 0.85,
+        }
+        self.strategy2_shadow_exit = None
 
         self.strategy2_pending_entry_manager.clear()
         self.strategy2_pending_contract = None
-        self.strategy2_option_tokens.pop(token, None)
         self.strategy2_engine.set_position_active(direction)
 
         return True
