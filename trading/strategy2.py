@@ -48,6 +48,8 @@ class FrozenStrategy2Engine:
         self._previous_ema20 = None
         self.active_position = None
         self.last_consumed_confirmation = None
+        self.last_signal_qualification_time = None
+        self.last_signal_pullback_time = None
 
     def set_position_active(self, side):
         if side not in ("CE", "PE"):
@@ -126,6 +128,8 @@ class FrozenStrategy2Engine:
 
         if result is not None:
             self.last_consumed_confirmation = candle.time
+            self.last_signal_qualification_time = self.qualified_at
+            self.last_signal_pullback_time = self.pullback_at
             self._reset_setup()
             return result
 

@@ -67,6 +67,7 @@ from trading.paper_position import PaperPosition
 from trading.paper_trade import PaperTrade
 from trading.strategy import SignalAction
 from trading.strategy2 import FrozenStrategy2Engine
+from trading.strategy2_forward_telemetry import Strategy2ForwardTelemetryStore
 from trading.strategy2_pending_entry import Strategy2PendingEntryManager
 
 
@@ -124,6 +125,7 @@ class MarketData:
         live_risk_evaluator=None,
         live_risk_guard=None,
         live_audit_sink=None,
+        strategy2_telemetry_store=None,
     ):
 
         if not isinstance(execution_mode, ExecutionMode):
@@ -246,6 +248,12 @@ class MarketData:
         self.strategy2_theoretical_entry_error = None
         self.strategy2_shadow_position = None
         self.strategy2_shadow_exit = None
+        self.strategy2_telemetry_store = (
+            strategy2_telemetry_store
+            if strategy2_telemetry_store is not None
+            else Strategy2ForwardTelemetryStore()
+        )
+        self.strategy2_telemetry_record_id = None
         self.paper_execution_engine = PaperExecutionEngine()
         self.execution_router = ExecutionRouter(
             mode=execution_mode,
@@ -473,6 +481,32 @@ class MarketData:
             active_position=False,
         )
 
+        telemetry_store = getattr(self, "strategy2_telemetry_store", None)
+        if telemetry_store is not None:
+            try:
+                self.strategy2_telemetry_record_id = (
+                    telemetry_store.record_confirmation(
+                        direction=direction,
+                        qualification_time=getattr(
+                            self.strategy2_engine,
+                            "last_signal_qualification_time",
+                            None,
+                        ),
+                        pullback_time=getattr(
+                            self.strategy2_engine,
+                            "last_signal_pullback_time",
+                            None,
+                        ),
+                        confirmation_time=snapshot.candle.time,
+                        spot_at_confirmation=snapshot.candle.close,
+                        contract=contract,
+                        expected_entry_time=pending.expected_entry_time,
+                    )
+                )
+            except Exception:
+                self.strategy2_pending_entry_manager.clear()
+                raise
+
         self.strategy2_theoretical_entry = None
         self.strategy2_theoretical_entry_error = None
         self.strategy2_pending_contract = contract
@@ -481,10 +515,77 @@ class MarketData:
 
         ticker = getattr(self, "_live_ticker", None)
         if ticker is not None:
-            ticker.subscribe([token])
-            ticker.set_mode(ticker.MODE_FULL, [token])
+            try:
+                ticker.subscribe([token])
+                ticker.set_mode(ticker.MODE_FULL, [token])
+            except Exception:
+                self.strategy2_pending_entry_manager.clear()
+                self.strategy2_pending_contract = None
+                self.strategy2_option_tokens.pop(token, None)
+                if telemetry_store is not None:
+                    telemetry_store.record_data_quality_flag(
+                        self.strategy2_telemetry_record_id,
+                        "SUBSCRIPTION_FAILED",
+                    )
+                raise
+            if telemetry_store is not None:
+                try:
+                    telemetry_store.record_subscription(
+                        self.strategy2_telemetry_record_id,
+                        self._live_market_data_clock(),
+                    )
+                except Exception:
+                    self.strategy2_pending_entry_manager.clear()
+                    self.strategy2_pending_contract = None
+                    self.strategy2_option_tokens.pop(token, None)
+                    raise
 
         return result
+
+    def _activate_strategy2_shadow_from_telemetry(self, pending, lifecycle):
+        entry_time = datetime.fromisoformat(lifecycle["theoretical_entry_time"])
+        entry_price = float(lifecycle["theoretical_entry_price"])
+        target_price = float(lifecycle["target_price"])
+        stop_price = float(lifecycle["stop_price"])
+        self.strategy2_theoretical_entry = {
+            "direction": pending.direction,
+            "contract_symbol": pending.contract_symbol,
+            "instrument_token": pending.instrument_token,
+            "confirmation_time": pending.confirmation_time,
+            "expected_entry_time": pending.expected_entry_time,
+            "theoretical_entry_time": entry_time,
+            "theoretical_entry_price": entry_price,
+        }
+        self.strategy2_shadow_position = {
+            "active": True,
+            "direction": pending.direction,
+            "contract_symbol": pending.contract_symbol,
+            "instrument_token": pending.instrument_token,
+            "entry_time": entry_time,
+            "entry_price": entry_price,
+            "target_price": target_price,
+            "stop_price": stop_price,
+        }
+        self.strategy2_shadow_exit = None
+        self.strategy2_pending_entry_manager.clear()
+        self.strategy2_pending_contract = None
+        self.strategy2_engine.set_position_active(pending.direction)
+
+    def _close_strategy2_shadow_from_telemetry(self, position, lifecycle):
+        exit_time = datetime.fromisoformat(lifecycle["exit_time"])
+        exit_price = float(lifecycle["exit_price"])
+        exit_reason = lifecycle["exit_reason"]
+        position["active"] = False
+        position["exit_time"] = exit_time
+        position["exit_price"] = exit_price
+        position["exit_reason"] = exit_reason
+        self.strategy2_shadow_exit = {
+            "exit_time": exit_time,
+            "exit_price": exit_price,
+            "exit_reason": exit_reason,
+        }
+        self.strategy2_option_tokens.pop(position["instrument_token"], None)
+        self.strategy2_engine.set_position_closed()
 
     def _handle_strategy2_option_tick(self, tick):
         # Captures the frozen Strategy 2 next-minute option-open reference.
@@ -494,6 +595,23 @@ class MarketData:
         if position is not None and position["active"]:
             if token != position["instrument_token"]:
                 return False
+
+            telemetry_store = getattr(self, "strategy2_telemetry_store", None)
+            if telemetry_store is not None:
+                lifecycle = telemetry_store.get_lifecycle(
+                    self.strategy2_telemetry_record_id
+                )
+                if lifecycle["exit_time"]:
+                    lifecycle = telemetry_store.record_exit(
+                        self.strategy2_telemetry_record_id,
+                        exit_time=datetime.fromisoformat(lifecycle["exit_time"]),
+                        exit_price=float(lifecycle["exit_price"]),
+                        exit_reason=lifecycle["exit_reason"],
+                    )
+                    self._close_strategy2_shadow_from_telemetry(
+                        position, lifecycle
+                    )
+                    return True
 
             timestamp = tick.get("exchange_timestamp")
             premium = tick.get("last_price")
@@ -520,17 +638,21 @@ class MarketData:
             if reason is None:
                 return True
 
-            position["active"] = False
-            position["exit_time"] = timestamp
-            position["exit_price"] = float(premium)
-            position["exit_reason"] = reason
-            self.strategy2_shadow_exit = {
-                "exit_time": timestamp,
-                "exit_price": float(premium),
-                "exit_reason": reason,
-            }
-            self.strategy2_option_tokens.pop(token, None)
-            self.strategy2_engine.set_position_closed()
+            telemetry_store = getattr(self, "strategy2_telemetry_store", None)
+            if telemetry_store is not None:
+                lifecycle = telemetry_store.record_exit(
+                    self.strategy2_telemetry_record_id,
+                    exit_time=timestamp,
+                    exit_price=premium,
+                    exit_reason=reason,
+                )
+            else:
+                lifecycle = {
+                    "exit_time": timestamp.isoformat(),
+                    "exit_price": float(premium),
+                    "exit_reason": reason,
+                }
+            self._close_strategy2_shadow_from_telemetry(position, lifecycle)
             return True
 
         pending = self.strategy2_pending_entry_manager.pending_entry
@@ -547,6 +669,26 @@ class MarketData:
         direction = self.strategy2_option_tokens.get(token)
         if direction != pending.direction:
             return False
+
+        telemetry_store = getattr(self, "strategy2_telemetry_store", None)
+        if telemetry_store is not None:
+            lifecycle = telemetry_store.get_lifecycle(
+                self.strategy2_telemetry_record_id
+            )
+            if lifecycle["theoretical_entry_time"]:
+                lifecycle = telemetry_store.record_theoretical_entry(
+                    self.strategy2_telemetry_record_id,
+                    entry_time=datetime.fromisoformat(
+                        lifecycle["theoretical_entry_time"]
+                    ),
+                    entry_price=float(lifecycle["theoretical_entry_price"]),
+                    target_price=float(lifecycle["target_price"]),
+                    stop_price=float(lifecycle["stop_price"]),
+                )
+                self._activate_strategy2_shadow_from_telemetry(
+                    pending, lifecycle
+                )
+                return True
 
         timestamp = tick.get("exchange_timestamp")
         premium = tick.get("last_price")
@@ -577,6 +719,12 @@ class MarketData:
             return True
 
         if observed_minute > expected_minute:
+            telemetry_store = getattr(self, "strategy2_telemetry_store", None)
+            if telemetry_store is not None:
+                telemetry_store.record_missed_entry(
+                    self.strategy2_telemetry_record_id,
+                    "MISSED_EXPECTED_ENTRY_MINUTE",
+                )
             self.strategy2_theoretical_entry_error = (
                 "MISSED_EXPECTED_ENTRY_MINUTE"
             )
@@ -588,31 +736,26 @@ class MarketData:
         if self.strategy2_theoretical_entry is not None:
             return True
 
-        self.strategy2_theoretical_entry = {
-            "direction": pending.direction,
-            "contract_symbol": pending.contract_symbol,
-            "instrument_token": pending.instrument_token,
-            "confirmation_time": pending.confirmation_time,
-            "expected_entry_time": pending.expected_entry_time,
-            "theoretical_entry_time": timestamp,
-            "theoretical_entry_price": float(premium),
-        }
         entry_price = float(premium)
-        self.strategy2_shadow_position = {
-            "active": True,
-            "direction": pending.direction,
-            "contract_symbol": pending.contract_symbol,
-            "instrument_token": pending.instrument_token,
-            "entry_time": timestamp,
-            "entry_price": entry_price,
-            "target_price": entry_price * 1.35,
-            "stop_price": entry_price * 0.85,
-        }
-        self.strategy2_shadow_exit = None
-
-        self.strategy2_pending_entry_manager.clear()
-        self.strategy2_pending_contract = None
-        self.strategy2_engine.set_position_active(direction)
+        target_price = entry_price * 1.35
+        stop_price = entry_price * 0.85
+        telemetry_store = getattr(self, "strategy2_telemetry_store", None)
+        if telemetry_store is not None:
+            lifecycle = telemetry_store.record_theoretical_entry(
+                self.strategy2_telemetry_record_id,
+                entry_time=timestamp,
+                entry_price=entry_price,
+                target_price=target_price,
+                stop_price=stop_price,
+            )
+        else:
+            lifecycle = {
+                "theoretical_entry_time": timestamp.isoformat(),
+                "theoretical_entry_price": entry_price,
+                "target_price": target_price,
+                "stop_price": stop_price,
+            }
+        self._activate_strategy2_shadow_from_telemetry(pending, lifecycle)
 
         return True
 
