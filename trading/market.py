@@ -336,6 +336,61 @@ class MarketData:
         self.last_position_display_time = None
         self.position_display_interval_seconds = 1.0
 
+    @classmethod
+    def create_strategy2_live_shadow(
+        cls,
+        kite,
+        instruments,
+        strategy2_telemetry_store=None,
+        observation_log=None,
+        ticker_factory=None,
+        clock=None,
+    ):
+        """Builds a Strategy 2-only market-data runtime with no execution objects."""
+        market = cls.__new__(cls)
+        market.kite = kite
+        market.instruments = instruments
+        market.ohlc = OHLCBuilder()
+        market.indicator_engine = IndicatorEngine()
+        market.strategy2_engine = FrozenStrategy2Engine()
+        market.strategy2_pending_entry_manager = Strategy2PendingEntryManager()
+        market.latest_strategy2_result = None
+        market.strategy2_option_tokens = {}
+        market.strategy2_pending_contract = None
+        market.strategy2_theoretical_entry = None
+        market.strategy2_theoretical_entry_error = None
+        market.strategy2_shadow_position = None
+        market.strategy2_shadow_exit = None
+        market.strategy2_telemetry_store = (
+            strategy2_telemetry_store
+            if strategy2_telemetry_store is not None
+            else Strategy2ForwardTelemetryStore()
+        )
+        market.strategy2_telemetry_record_id = None
+        market.processed_candle_times = set()
+        market.completed_candle_count = 0
+        market.nifty_index_token = None
+        market.latest_option_premiums = {}
+        market.latest_nifty_spot = None
+        market.latest_indicator_values = {}
+        market.latest_completed_snapshot = None
+        market._live_ticker = None
+        market._strategy2_observation_log = observation_log
+        market._strategy2_ticker_factory = ticker_factory or KiteTicker
+        market._live_market_data_clock = (
+            clock if clock is not None else lambda: datetime.now(EXCHANGE_TIMEZONE)
+        )
+        return market
+
+    def _observe_strategy2(self, event_type, **fields):
+        observer = getattr(self, "_strategy2_observation_log", None)
+        if observer is not None:
+            observer.record(event_type, **fields)
+
+    def _strategy2_observed_at(self):
+        clock = getattr(self, "_live_market_data_clock", None)
+        return clock() if clock is not None else datetime.now(EXCHANGE_TIMEZONE)
+
     def _select_nifty_option_pair(
         self,
         ws,
@@ -443,12 +498,37 @@ class MarketData:
 
     def _process_strategy2_shadow(self, snapshot):
         # Evaluate frozen Strategy 2 without routing any order.
+        previous_state = getattr(self.strategy2_engine, "state", None)
         result = self.strategy2_engine.evaluate(
             snapshot,
             option_premiums=dict(self.latest_option_premiums),
         )
 
         self.latest_strategy2_result = result
+
+        current_state = getattr(self.strategy2_engine, "state", None)
+        if current_state is not None and current_state != previous_state:
+            self._observe_strategy2(
+                "STRATEGY_STATE_CHANGE",
+                strategy_state=current_state.value,
+                qualification_time=getattr(
+                    self.strategy2_engine, "qualified_at", None
+                ),
+                pullback_time=getattr(self.strategy2_engine, "pullback_at", None),
+            )
+            if current_state.value == "TREND_QUALIFIED":
+                self._observe_strategy2(
+                    "QUALIFIED",
+                    strategy_state=current_state.value,
+                    qualification_time=self.strategy2_engine.qualified_at,
+                )
+            elif current_state.value == "PULLBACK_DETECTED":
+                self._observe_strategy2(
+                    "PULLBACK",
+                    strategy_state=current_state.value,
+                    qualification_time=self.strategy2_engine.qualified_at,
+                    pullback_time=self.strategy2_engine.pullback_at,
+                )
 
         if result.action not in (
             SignalAction.BUY_CE,
@@ -468,6 +548,24 @@ class MarketData:
             else "PE"
         )
 
+        self._observe_strategy2(
+            "CONFIRMED",
+            strategy_state=(
+                current_state.value if current_state is not None else None
+            ),
+            confirmation_time=snapshot.candle.time,
+            qualification_time=getattr(
+                self.strategy2_engine, "last_signal_qualification_time", None
+            ),
+            pullback_time=getattr(
+                self.strategy2_engine, "last_signal_pullback_time", None
+            ),
+            spot_price=snapshot.candle.close,
+            ema9=snapshot.values.get("ema", {}).get(9),
+            ema20=snapshot.values.get("ema", {}).get(20),
+            direction=direction,
+        )
+
         contract = self.instruments.get_nifty_strategy2_contract(
             snapshot.candle.close,
             direction,
@@ -479,6 +577,18 @@ class MarketData:
             confirmation_time=snapshot.candle.time,
             contract=contract,
             active_position=False,
+        )
+
+        self._observe_strategy2(
+            "CONTRACT_SELECTED",
+            direction=direction,
+            confirmation_time=snapshot.candle.time,
+            expected_entry_time=pending.expected_entry_time,
+            spot_price=snapshot.candle.close,
+            atm=contract["atm_strike"],
+            otm=contract["otm_strike"],
+            contract_symbol=contract["tradingsymbol"],
+            instrument_token=contract["instrument_token"],
         )
 
         telemetry_store = getattr(self, "strategy2_telemetry_store", None)
@@ -539,6 +649,13 @@ class MarketData:
                     self.strategy2_pending_contract = None
                     self.strategy2_option_tokens.pop(token, None)
                     raise
+            self._observe_strategy2(
+                "OPTION_SUBSCRIBED",
+                instrument_token=token,
+                contract_symbol=contract["tradingsymbol"],
+                subscription_observation_time=self._strategy2_observed_at(),
+                expected_entry_time=pending.expected_entry_time,
+            )
 
         return result
 
@@ -570,6 +687,17 @@ class MarketData:
         self.strategy2_pending_entry_manager.clear()
         self.strategy2_pending_contract = None
         self.strategy2_engine.set_position_active(pending.direction)
+        self._observe_strategy2(
+            "THEORETICAL_ENTRY",
+            direction=pending.direction,
+            contract_symbol=pending.contract_symbol,
+            instrument_token=pending.instrument_token,
+            expected_entry_time=pending.expected_entry_time,
+            theoretical_entry_time=entry_time,
+            theoretical_entry_price=entry_price,
+            target=target_price,
+            stop=stop_price,
+        )
 
     def _close_strategy2_shadow_from_telemetry(self, position, lifecycle):
         exit_time = datetime.fromisoformat(lifecycle["exit_time"])
@@ -586,6 +714,14 @@ class MarketData:
         }
         self.strategy2_option_tokens.pop(position["instrument_token"], None)
         self.strategy2_engine.set_position_closed()
+        self._observe_strategy2(
+            exit_reason,
+            instrument_token=position["instrument_token"],
+            contract_symbol=position["contract_symbol"],
+            exit_time=exit_time,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+        )
 
     def _handle_strategy2_option_tick(self, tick):
         # Captures the frozen Strategy 2 next-minute option-open reference.
@@ -731,6 +867,13 @@ class MarketData:
             self.strategy2_pending_entry_manager.clear()
             self.strategy2_pending_contract = None
             self.strategy2_option_tokens.pop(token, None)
+            self._observe_strategy2(
+                "MISSED_ENTRY",
+                instrument_token=token,
+                expected_entry_time=pending.expected_entry_time,
+                observed_time=timestamp,
+                exit_reason="MISSED_EXPECTED_ENTRY_MINUTE",
+            )
             return True
 
         if self.strategy2_theoretical_entry is not None:
@@ -1677,6 +1820,111 @@ class MarketData:
     # ==================================================
     # Live Market Data
     # ==================================================
+
+    def connect_strategy2_live_shadow(self, symbol="NIFTY 50"):
+        """Runs the isolated Strategy 2 market-data path; it has no execution path."""
+        symbol = symbol.strip().upper()
+        if symbol != "NIFTY 50":
+            raise ValueError("Strategy 2 shadow data is configured for NIFTY 50 only.")
+
+        instrument_token = self.instruments.get_nifty_index_token()
+        self.nifty_index_token = instrument_token
+        kws = self._strategy2_ticker_factory(
+            KITE_API_KEY,
+            self.kite.access_token,
+        )
+        self._live_ticker = kws
+
+        def on_connect(ws, response):
+            _ = response
+            ws.subscribe([instrument_token])
+            ws.set_mode(ws.MODE_FULL, [instrument_token])
+            self._observe_strategy2(
+                "NIFTY_SUBSCRIBED",
+                instrument_token=instrument_token,
+                subscription_observation_time=self._live_market_data_clock(),
+            )
+
+        def on_ticks(ws, ticks):
+            _ = ws
+            for tick in ticks:
+                token = tick.get("instrument_token")
+                if token in self.strategy2_option_tokens:
+                    self._handle_strategy2_option_tick(tick)
+                    continue
+                if token != instrument_token:
+                    continue
+
+                receipt_time = self._live_market_data_clock()
+                raw_timestamp = tick.get("exchange_timestamp")
+                is_naive = (
+                    isinstance(raw_timestamp, datetime)
+                    and (
+                        raw_timestamp.tzinfo is None
+                        or raw_timestamp.utcoffset() is None
+                    )
+                )
+                quality_flags = (
+                    ["NAIVE_EXCHANGE_TIMESTAMP_HOST_LOCAL_INTERPRETATION"]
+                    if is_naive else []
+                )
+                normalized = (
+                    self._normalize_execution_time(raw_timestamp)
+                    if isinstance(raw_timestamp, datetime) else None
+                )
+                self._observe_strategy2(
+                    "RAW_NIFTY_TICK",
+                    receipt_time=receipt_time,
+                    raw_exchange_timestamp=raw_timestamp,
+                    raw_timestamp_is_naive=is_naive,
+                    raw_timestamp_tzinfo=(
+                        str(raw_timestamp.tzinfo)
+                        if isinstance(raw_timestamp, datetime) else None
+                    ),
+                    normalized_ist_timestamp=normalized,
+                    spot_price=tick.get("last_price"),
+                    data_quality_flags=quality_flags,
+                )
+
+                result = self.ohlc.process_tick(tick)
+                completed_candle = result["completed_candle"]
+                if completed_candle is None:
+                    continue
+
+                self.completed_candle_count += 1
+                processing = self._process_completed_candle(completed_candle)
+                if not processing["processed"]:
+                    continue
+                ema_values = processing["indicator_values"]
+                snapshot = IndicatorSnapshot(
+                    candle=completed_candle,
+                    values={"ema": ema_values},
+                )
+                self.latest_nifty_spot = tick.get("last_price")
+                self.latest_completed_snapshot = snapshot
+                self.latest_indicator_values = ema_values
+                self._observe_strategy2(
+                    "COMPLETED_CANDLE",
+                    receipt_time=receipt_time,
+                    completed_candle_timestamp=completed_candle.time,
+                    spot_price=completed_candle.close,
+                    ema9=ema_values.get(9),
+                    ema20=ema_values.get(20),
+                    strategy_state=self.strategy2_engine.state.value,
+                    qualification_time=self.strategy2_engine.qualified_at,
+                    pullback_time=self.strategy2_engine.pullback_at,
+                    data_quality_flags=quality_flags,
+                )
+                self._process_strategy2_shadow(snapshot)
+
+        kws.on_connect = on_connect
+        kws.on_ticks = on_ticks
+        kws.connect()
+
+    def disconnect_strategy2_live_shadow(self):
+        ticker = getattr(self, "_live_ticker", None)
+        if ticker is not None and hasattr(ticker, "close"):
+            ticker.close()
 
     def connect_live(
         self,
